@@ -3,6 +3,7 @@ Code modified from PyTorch DCGAN examples: https://github.com/pytorch/examples/t
 """
 from __future__ import print_function
 import argparse
+import glob
 import os
 import numpy as np
 import random
@@ -16,10 +17,14 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
-from utils import weights_init, compute_acc
+from utils import weights_init, compute_acc, decimate
 from network import _netG, _netD, _netD_CIFAR10, _netG_CIFAR10
 from folder import ImageFolder
 
+import visdom
+from scipy import misc
+
+import pdb
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | imagenet')
@@ -42,8 +47,27 @@ parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--num_classes', type=int, default=10, help='Number of classes for AC-GAN')
 parser.add_argument('--gpu_id', type=int, default=0, help='The ID of the specified GPU')
 
+parser.add_argument('--host', default='http://ramawks69', type=str, help="hostname/server visdom listener is on.")
+parser.add_argument('--port', default=8097, type=int, help="which port visdom should use.")
+parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
+parser.add_argument('--eval_period', type=int, default=100)
+
+
 opt = parser.parse_args()
 print(opt)
+
+# setup visdom
+vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
+visdom_visuals_ids = []
+empty_img = np.moveaxis(misc.imread('404_32.png'),-1,0) / 255.0
+def winid():
+    """
+    Pops first item on visdom_visuals_ids or returns none if it is empty
+    """
+    visid = None # acceptable id to make a new plot
+    if visdom_visuals_ids:
+        visid = visdom_visuals_ids.pop(0)
+    return visid
 
 # specify the gpu id if using only 1 gpu
 if opt.ngpu == 1:
@@ -102,6 +126,17 @@ ngf = int(opt.ngf)
 ndf = int(opt.ndf)
 num_classes = int(opt.num_classes)
 nc = 3
+
+# check outf for files
+netGfiles = glob.glob(os.path.join(opt.outf, 'netG_epoch_*.pth'))
+netGfiles.sort(key = lambda s: int(s.split('_')[-1].split('.')[0]))
+if opt.netG == '' and netGfiles:
+    opt.netG = netGfiles[-1]
+
+netDfiles = glob.glob(os.path.join(opt.outf, 'netD_epoch_*.pth'))
+netDfiles.sort(key = lambda s: int(s.split('_')[-1].split('.')[0]))
+if opt.netD == '' and netDfiles:
+    opt.netD = netDfiles[-1]
 
 # Define the generator and initialize the weights
 if opt.dataset == 'imagenet':
@@ -167,8 +202,11 @@ optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 avg_loss_D = 0.0
 avg_loss_G = 0.0
 avg_loss_A = 0.0
+history = []
+iters = 0
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
+        iters += 1
         ############################
         # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
         ###########################
@@ -242,15 +280,37 @@ for epoch in range(opt.niter):
         print('[%d/%d][%d/%d] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
               % (epoch, opt.niter, i, len(dataloader),
                  errD.data[0], avg_loss_D, errG.data[0], avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
-        if i % 100 == 0:
-            vutils.save_image(
-                real_cpu, '%s/real_samples.png' % opt.outf)
-            print('Label for eval = {}'.format(eval_label))
+        if i % opt.eval_period == 0:
+            history.append([errD.data[0].item(), errG.data[0].item()])
+            # setup
+            nphist = np.array(history)
+            max_line_samples = 200
+            ds = max(1,nphist.shape[0] // (max_line_samples+1))
+            ts = list(range(0,iters+1,opt.eval_period))
+            dts = decimate(ts,ds)
+
+            new_ids = []
+
             fake = netG(eval_noise)
-            vutils.save_image(
-                fake.data,
-                '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch)
-            )
+
+            real_grid = vutils.make_grid(real_cpu, nrow=10, padding=2, normalize=True)
+            new_ids.append(vis.image(real_grid, win=winid(), opts={'title': 'Real Images' }))
+
+            fake_grid = vutils.make_grid(fake.data, nrow=10, padding=2, normalize=True)
+            new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fakes' }))
+
+            new_ids.append(vis.line(decimate(nphist[:,:2],ds), dts, win=winid(), opts={'legend': ['D', 'G'], 'title': 'Loss'}))
+
+            # vutils.save_image(
+            #     real_cpu, '%s/real_samples.png' % opt.outf)
+            # print('Label for eval = {}'.format(eval_label))
+            # vutils.save_image(
+            #     fake.data,
+            #     '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch)
+            # )
+
+            # done plotting, update ids
+            visdom_visuals_ids = new_ids
 
     # do checkpointing
     torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
