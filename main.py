@@ -295,8 +295,62 @@ while True:
         real_grid = vutils.make_grid(real_cpu, nrow=10, padding=2, normalize=True)
         new_ids.append(vis.image(real_grid, win=winid(), opts={'title': 'Real Images' }))
 
+        dis_output, aux_output = netD(real_cpu)
+        # sort the real images
+        real_data = real_cpu.data.cpu()
+        preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+        sorted_i = np.argsort(preds)
+        sorted_preds = preds[sorted_i]
+        sorted_real_imgs = np.zeros(real_data.shape)
+        plab = 0
+        for i in range(real_data.shape[0]):
+            now_lab = i // 10
+            # if we have too many images from earlier labels: fast forward
+            while (plab < len(sorted_preds)) and (sorted_preds[plab] < now_lab):
+                plab += 1
+
+            if (plab == len(sorted_preds)) or (sorted_preds[plab] > now_lab): # ran out of images for this label
+                # put in a blank image
+                sorted_real_imgs[i,:,:,:] = empty_img
+            elif sorted_preds[plab] == now_lab: # have an image
+                # use the image
+                sorted_real_imgs[i,:,:,:] = real_data[sorted_i[plab],:,:,:]
+                plab += 1
+
+        # plot sorted reals
+        real_grid_sorted = vutils.make_grid(torch.Tensor(sorted_real_imgs), nrow=10, padding=2, normalize=True)
+        new_ids.append(vis.image(real_grid_sorted, win=winid(), opts={'title': 'Sorted Real Images' }))
+
+        # fake images
         fake_grid = vutils.make_grid(fake.data, nrow=10, padding=2, normalize=True)
-        new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fakes' }))
+        new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fixed Fakes' }))
+
+        dis_output, aux_output = netD(fake)
+        # same images but sorted
+        fixed_fake = fake.data.cpu()
+        preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+        sorted_i = np.argsort(preds)
+        sorted_preds = preds[sorted_i]
+        sorted_imgs = np.zeros(fixed_fake.shape)
+        plab = 0
+        for i in range(fixed_fake.shape[0]):
+            now_lab = i // 10
+            # if we have too many images from earlier labels: fast forward
+            while (plab < len(sorted_preds)) and (sorted_preds[plab] < now_lab):
+                plab += 1
+
+            if (plab == len(sorted_preds)) or (sorted_preds[plab] > now_lab): # ran out of images for this label
+                # put in a blank image
+                sorted_imgs[i,:,:,:] = empty_img
+            elif sorted_preds[plab] == now_lab: # have an image
+                # use the image
+                sorted_imgs[i,:,:,:] = fixed_fake[sorted_i[plab],:,:,:]
+                plab += 1
+
+        # plot sorted fakes
+        fake_grid_sorted = vutils.make_grid(torch.Tensor(sorted_imgs), nrow=10, padding=2, normalize=True)
+        new_ids.append(vis.image(fake_grid_sorted, win=winid(), opts={'title': 'Sorted Fixed Fakes' }))
+
 
         new_ids.append(vis.line(decimate(nphist[:,:2],ds), dts, win=winid(), opts={'legend': ['D', 'G'], 'title': 'Loss'}))
 
