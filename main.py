@@ -96,13 +96,6 @@ cudnn.benchmark = True
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
-# datase t
-if opt.dataset == 'cifar':
-    labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = data.get_cifar_loaders(opt)
-
-else:
-    raise NotImplementedError("No such dataset {}".format(opt.dataset))
-
 # some hyper parameters
 ngpu = int(opt.ngpu)
 nz = int(opt.nz)
@@ -113,7 +106,13 @@ nc = 3
 if not opt.dev_batch_size:
     opt.dev_batch_size = 2*opt.train_batch_size
 if not opt.train_batch_size_2:
-    opt.train_batch_size_2 = 2*opt.train_batch_size
+    opt.train_batch_size_2 = opt.train_batch_size
+
+# dataset
+if opt.dataset == 'cifar':
+    labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = data.get_cifar_loaders(opt)
+else:
+    raise NotImplementedError("No such dataset {}".format(opt.dataset))
 
 # check outf for files
 netGfiles = glob.glob(os.path.join(opt.outf, 'netG_iter_*.pth'))
@@ -239,7 +238,18 @@ while True:
     errD_fake = dis_errD_fake + aux_errD_fake
     errD_fake.backward()
     D_G_z1 = dis_output.data.mean()
-    errD = errD_real + errD_fake
+    
+    # train with unlabeled
+    unl_images, _ = unlabeled_loader.next()
+    if opt.cuda:
+        unl_images = unl_images.cuda()
+    input.data.copy_(unl_images)
+    dis_label.data.fill_(real_label)
+    dis_output, aux_output = netD(input)
+    dis_errD_unl = dis_criterion(dis_output, dis_label)
+    dis_errD_unl.backward()
+
+    errD = errD_real + errD_fake + dis_errD_unl
     optimizerD.step()
 
     ############################
