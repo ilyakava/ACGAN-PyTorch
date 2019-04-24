@@ -52,6 +52,7 @@ parser.add_argument('--host', default='http://ramawks69', type=str, help="hostna
 parser.add_argument('--port', default=8097, type=int, help="which port visdom should use.")
 parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
 parser.add_argument('--eval_period', type=int, default=100)
+parser.add_argument('--marygan', type=bool, default=False)
 
 # for data loader
 parser.add_argument('--size_labeled_data',  type=int, default=4000)
@@ -223,9 +224,10 @@ while True:
     noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
     label = np.random.randint(0, num_classes, batch_size)
     noise_ = np.random.normal(0, 1, (batch_size, nz))
-    class_onehot = np.zeros((batch_size, num_classes))
-    class_onehot[np.arange(batch_size), label] = 1
-    noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+    if not opt.marygan:
+        class_onehot = np.zeros((batch_size, num_classes))
+        class_onehot[np.arange(batch_size), label] = 1
+        noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
     noise_ = (torch.from_numpy(noise_))
     noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
     aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
@@ -234,8 +236,11 @@ while True:
     dis_label.data.fill_(fake_label)
     dis_output, aux_output = netD(fake.detach())
     dis_errD_fake = dis_criterion(dis_output, dis_label)
-    aux_errD_fake = aux_criterion(aux_output, aux_label)
-    errD_fake = dis_errD_fake + aux_errD_fake
+    if opt.marygan:
+        errD_fake = dis_errD_fake
+    else:
+        aux_errD_fake = aux_criterion(aux_output, aux_label)
+        errD_fake = dis_errD_fake + aux_errD_fake
     errD_fake.backward()
     D_G_z1 = dis_output.data.mean()
     
@@ -259,7 +264,10 @@ while True:
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
     dis_output, aux_output = netD(fake)
     dis_errG = dis_criterion(dis_output, dis_label)
-    aux_errG = aux_criterion(aux_output, aux_label)
+    if opt.marygan:
+        aux_errG = -torch.mean(aux_output.max(1)[0])
+    else:
+        aux_errG = aux_criterion(aux_output, aux_label)
     errG = dis_errG + aux_errG
     errG.backward()
     D_G_z2 = dis_output.data.mean()
