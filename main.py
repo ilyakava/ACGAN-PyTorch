@@ -300,8 +300,8 @@ while True:
     all_loss_G = avg_loss_G * curr_iter
     all_loss_D = avg_loss_D * curr_iter
     all_loss_A = avg_loss_A * curr_iter
-    all_loss_G += errG.data[0]
-    all_loss_D += errD.data[0]
+    all_loss_G += errG.item()
+    all_loss_D += errD.item()
     all_loss_A += accuracy
     avg_loss_G = all_loss_G / (curr_iter + 1)
     avg_loss_D = all_loss_D / (curr_iter + 1)
@@ -309,7 +309,7 @@ while True:
 
     print('[%06d] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
           % (curr_iter,
-             errD.data[0], avg_loss_D, errG.data[0], avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
+             errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
     
     ### FID CALCULATION
     if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
@@ -371,7 +371,7 @@ while True:
 
 
     if curr_iter % opt.eval_period == 0:
-        history.append([errD.data[0].item(), errG.data[0].item()])
+        history.append([errD.item(), errG.item()])
         history_times.append(curr_iter)
         # setup
         nphist = np.array(history)
@@ -466,3 +466,4 @@ while True:
                 os.remove('%s/netD_iter_%06d.pth' % (opt.outf, saved_train_itrs[di]))
                 os.remove('%s/fake_samples_epoch_%06d.png' % (opt.outf, saved_train_itrs[di]))
                 
+
