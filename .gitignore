@@ -1,3 +1,6 @@
 outputs*
 *.pyc
 *.sw[po]
+links.txt
+.ipynb_checkpoints/*
+

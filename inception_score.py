@@ -15,6 +15,8 @@ import scipy.misc
 import math
 import sys
 
+from tqdm import tqdm
+
 MODEL_DIR = '/tmp/imagenet'
 DATA_URL = 'http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz'
 softmax = None
@@ -22,25 +24,25 @@ softmax = None
 # Call this function with list of images. Each of elements should be a 
 # numpy array with values ranging from 0 to 255.
 def get_inception_score(images, splits=10):
-  assert(type(images) == list)
-  assert(type(images[0]) == np.ndarray)
-  assert(len(images[0].shape) == 3)
-  assert(np.max(images[0]) > 10)
-  assert(np.min(images[0]) >= 0.0)
-  inps = []
-  for img in images:
-    img = img.astype(np.float32)
-    inps.append(np.expand_dims(img, 0))
+  #assert(type(images) == list)
+  #assert(type(images[0]) == np.ndarray)
+  assert(len(images[0].shape) == 4, )
+  assert(np.max(images[0]) > 10, )
+  assert(np.min(images[0]) >= 0.0, )
+  #inps = []
+  #for img in images:
+  #  img = img.astype(np.float32)
+  #  inps.append(np.expand_dims(img, 0))
   bs = 1
   with tf.Session() as sess:
     preds = []
-    n_batches = int(math.ceil(float(len(inps)) / float(bs)))
-    for i in range(n_batches):
-        sys.stdout.write(".")
-        sys.stdout.flush()
-        inp = inps[(i * bs):min((i + 1) * bs, len(inps))]
-        inp = np.concatenate(inp, 0)
-        pred = sess.run(softmax, {'ExpandDims:0': inp})
+    n_batches = int(math.ceil(float(images.shape[0]) / float(bs)))
+    for i in tqdm(range(n_batches), desc="IS"):
+        #sys.stdout.write(".")
+        #sys.stdout.flush()
+        #inp = inps[(i * bs):min((i + 1) * bs, len(inps))]
+        #inp = np.concatenate(inp, 0)
+        pred = sess.run(softmax, {'ExpandDims:0': images[(i * bs):min((i + 1) * bs, images.shape[0])]})
         preds.append(pred)
     preds = np.concatenate(preds, 0)
     scores = []
