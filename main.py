@@ -203,6 +203,7 @@ score_history_times = []
 delete_idx = cycle([1,2,3])
 saved_eval_itrs = []
 saved_train_itrs = []
+latest_save = None
 
 while True:
     curr_iter += 1
@@ -320,8 +321,9 @@ while True:
             noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
             fake = netG(noise).data.cpu()
             
+            fake = (fake + 1) / 2.0
             for j in range(opt.train_batch_size):
-                vutils.save_image(fake[j],'%s/GAN_OUTPUTS/gan_out_%05d.png' % (opt.outf, start + j))
+                vutils.save_image(fake[j],'%s/GAN_OUTPUTS/gan_out_%05d.png' % (opt.outf, start + j), normalize=False)
 
         with open('%s/scoring.info' % opt.outf,'w') as f:
             f.write(str(curr_iter))
@@ -401,12 +403,12 @@ while True:
 
         new_ids.append(vis.line(decimate(nphist[:,:2],ds), dts, win=winid(), opts={'legend': ['D', 'G'], 'title': 'Loss'}))
 
-
         # done plotting, update ids
         visdom_visuals_ids = new_ids
 
+
         # do checkpointing
-        # funny saving protocol to only ever write 5 files
+        # funny saving protocol to only ever write 5 historical files
         last_save = saved_eval_itrs[-1] if saved_eval_itrs else 0.5
         eval_itr = len(history)
         if last_save*2 == eval_itr:
@@ -423,4 +425,11 @@ while True:
                 os.remove('%s/netD_iter_%06d.pth' % (opt.outf, ditr))
                 os.remove('%s/fake_samples_iter_%06d.png' % (opt.outf, ditr))
                 
+        # save latest
+        if latest_save and (latest_save not in saved_train_itrs):
+            os.remove('%s/netG_iter_%06d.pth' % (opt.outf, latest_save))
+            os.remove('%s/netD_iter_%06d.pth' % (opt.outf, latest_save))
+        torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
+        torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
+        latest_save = curr_iter
 
