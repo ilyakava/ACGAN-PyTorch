@@ -25,10 +25,6 @@ from utils import weights_init, compute_acc, decimate
 from network import _netG, _netD, _netD_CIFAR10, _netG_CIFAR10
 from folder import ImageFolder
 
-from inception import InceptionV3
-from torch.nn.functional import adaptive_avg_pool2d
-from fid_score import calculate_frechet_distance
-
 import visdom
 import imageio
 
@@ -43,7 +39,6 @@ parser.add_argument('--imageSize', type=int, default=128, help='the height / wid
 parser.add_argument('--nz', type=int, default=110, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--niter', type=int, default=25)
 parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
@@ -57,9 +52,9 @@ parser.add_argument('--num_classes', type=int, default=10, help='Number of class
 parser.add_argument('--host', default='http://ramawks69', type=str, help="hostname/server visdom listener is on.")
 parser.add_argument('--port', default=8097, type=int, help="which port visdom should use.")
 parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
-parser.add_argument('--eval_period', type=int, default=100)
+parser.add_argument('--eval_period', type=int, default=1000)
 parser.add_argument('--marygan', type=bool, default=False, help="Include this argument to use marygan loss, otherwise omit it")
-parser.add_argument('--scoring_period', type=int, default=25000)
+parser.add_argument('--scoring_period', type=int, default=10000)
 parser.add_argument('--run_scoring_now', type=bool, default=False)
 
 # for data loader
@@ -82,7 +77,6 @@ def winid():
     if visdom_visuals_ids:
         visid = visdom_visuals_ids.pop(0)
     return visid
-visdom_score_visual_id = None
 
 try:
     os.makedirs(opt.outf)
@@ -197,14 +191,6 @@ eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz, 1, 1))
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
-# scoring related
-dims = 2048
-block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
-fidmodel = InceptionV3([block_idx])
-if opt.cuda:
-    fidmodel.cuda()
-fidmodel.eval()
-
 
 avg_loss_D = 0.0
 avg_loss_G = 0.0
@@ -311,22 +297,16 @@ while True:
           % (curr_iter,
              errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
     
-    ### FID CALCULATION
+    ### Save GAN Images to interface with IS and FID scores
     if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
         opt.run_scoring_now = False
         n_used_imgs = 50000
-        bigger_loader = (unlabeled_loader if (len(unlabeled_loader) > len(labeled_loader)) else labeled_loader)
-        # get activations for all imgs
-        act1 = np.empty((n_used_imgs, dims))
-        act2 = np.empty((n_used_imgs, dims))
-        for i in tqdm(range(n_used_imgs // opt.train_batch_size),desc='FID'):
+        if not os.path.exists('%s/GAN_OUTPUTS' % (opt.outf)):
+            os.makedirs('%s/GAN_OUTPUTS' % (opt.outf))
+        # save a bunch of GAN images
+        for i in tqdm(range(n_used_imgs // opt.train_batch_size),desc='Saving'):
             start = i * opt.train_batch_size
             end = start + opt.train_batch_size
-
-            # real
-            real_cpu, _ = bigger_loader.next()
-            if opt.cuda:
-                real_cpu = real_cpu.cuda()
 
             # fake
             noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
@@ -338,36 +318,13 @@ while True:
                 noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
             noise_ = (torch.from_numpy(noise_))
             noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
-            fake = netG(noise)
+            fake = netG(noise).data.cpu()
+            
+            for j in range(opt.train_batch_size):
+                vutils.save_image(fake[j],'%s/GAN_OUTPUTS/gan_out_%05d.png' % (opt.outf, start + j))
 
-            # real
-            pred = fidmodel(real_cpu)[0]
-            # If model output is not scalar, apply global spatial average pooling.
-            # This happens if you choose a dimensionality not equal 2048.
-            if pred.shape[2] != 1 or pred.shape[3] != 1:
-                pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
-            act1[start:end] = pred.cpu().data.numpy().reshape(opt.train_batch_size, -1)
-
-            # fake
-            pred = fidmodel(fake.detach())[0]
-            # If model output is not scalar, apply global spatial average pooling.
-            # This happens if you choose a dimensionality not equal 2048.
-            if pred.shape[2] != 1 or pred.shape[3] != 1:
-                pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
-            act2[start:end] = pred.cpu().data.numpy().reshape(opt.train_batch_size, -1)
-
-
-        mu1 = np.mean(act1, axis=0)
-        sigma1 = np.cov(act1, rowvar=False)
-        mu2 = np.mean(act2, axis=0)
-        sigma2 = np.cov(act2, rowvar=False)
-        fid_value = calculate_frechet_distance(mu1, sigma1, mu2, sigma2)
-
-        score_history.append(fid_value)
-        score_history_times.append(curr_iter)
-
-        visdom_score_visual_id = vis.line(score_history, score_history_times, win=visdom_score_visual_id, opts={'legend': ['FID'], 'title': 'Scores'})
-
+        with open('%s/scoring.info' % opt.outf,'w') as f:
+            f.write(str(curr_iter))
 
 
     if curr_iter % opt.eval_period == 0:
@@ -458,12 +415,12 @@ while True:
 
             torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
             torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
-            vutils.save_image(fake.data,'%s/fake_samples_epoch_%06d.png' % (opt.outf, curr_iter))
+            vutils.save_image(fake.data,'%s/fake_samples_iter_%06d.png' % (opt.outf, curr_iter))
 
             if len(saved_eval_itrs) > 5:
-                di = next(delete_idx)
-                os.remove('%s/netG_iter_%06d.pth' % (opt.outf, saved_train_itrs[di]))
-                os.remove('%s/netD_iter_%06d.pth' % (opt.outf, saved_train_itrs[di]))
-                os.remove('%s/fake_samples_epoch_%06d.png' % (opt.outf, saved_train_itrs[di]))
+                ditr = saved_train_itrs.pop(next(delete_idx))
+                os.remove('%s/netG_iter_%06d.pth' % (opt.outf, ditr))
+                os.remove('%s/netD_iter_%06d.pth' % (opt.outf, ditr))
+                os.remove('%s/fake_samples_iter_%06d.png' % (opt.outf, ditr))
                 
 
