@@ -8,7 +8,7 @@ import pathlib
 import imageio
 import numpy as np
 import fid
-import inception_score as iscore
+import inception as iscore
 import imageio
 import tensorflow as tf
 from torchvision.datasets import CIFAR10
@@ -83,10 +83,14 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
             f.close()
     
     history = []
-    print('Beginning to listen for: %s...' % lf)
+    if opt.run_scoring_now:
+        print('Running scoring now for: %s...' % lf)
+    else:
+        print('Beginning to listen for: %s...' % lf)
+        
     while True:
-        now_itr = last_itr
-        if os.path.isfile(lf):
+        now_itr = last_itr # init
+        if os.path.isfile(lf): # set now_itr
             f = open(lf,'r')
             now_itr = int(f.read())
             f.close()
