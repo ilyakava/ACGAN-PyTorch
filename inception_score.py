@@ -17,24 +17,27 @@ import sys
 
 from tqdm import tqdm
 
+import pdb
+
 MODEL_DIR = '/tmp/imagenet'
 DATA_URL = 'http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz'
 softmax = None
 
 # Call this function with list of images. Each of elements should be a 
 # numpy array with values ranging from 0 to 255.
-def get_inception_score(images, splits=10):
+def get_inception_score(images, splits=10, batch_size=100, mem_fraction=1):
   #assert(type(images) == list)
   #assert(type(images[0]) == np.ndarray)
-  assert(len(images[0].shape) == 4, )
-  assert(np.max(images[0]) > 10, )
-  assert(np.min(images[0]) >= 0.0, )
+  assert(len(images.shape) == 4, 'Input should be 4 dim')
+  assert(np.max(images[0]) > 10, 'Input should be 0 to 255')
+  assert(np.min(images[0]) >= 0.0, 'Input should be greater than 0 always')
   #inps = []
   #for img in images:
   #  img = img.astype(np.float32)
   #  inps.append(np.expand_dims(img, 0))
-  bs = 1
-  with tf.Session() as sess:
+  bs = batch_size
+  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=mem_fraction)
+  with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
     preds = []
     n_batches = int(math.ceil(float(images.shape[0]) / float(bs)))
     for i in tqdm(range(n_batches), desc="IS"):
@@ -42,7 +45,7 @@ def get_inception_score(images, splits=10):
         #sys.stdout.flush()
         #inp = inps[(i * bs):min((i + 1) * bs, len(inps))]
         #inp = np.concatenate(inp, 0)
-        pred = sess.run(softmax, {'ExpandDims:0': images[(i * bs):min((i + 1) * bs, images.shape[0])]})
+        pred = sess.run(softmax, {'InputTensor:0': images[(i * bs):min((i + 1) * bs, images.shape[0])]})
         preds.append(pred)
     preds = np.concatenate(preds, 0)
     scores = []
@@ -74,7 +77,12 @@ def _init_inception():
       MODEL_DIR, 'classify_image_graph_def.pb'), 'rb') as f:
     graph_def = tf.GraphDef()
     graph_def.ParseFromString(f.read())
-    _ = tf.import_graph_def(graph_def, name='')
+    # Import model with a modification in the input tensor to accept arbitrary
+    # batch size.
+    input_tensor = tf.placeholder(tf.float32, shape=[None, None, None, 3],
+                                  name='InputTensor')
+    _ = tf.import_graph_def(graph_def, name='',
+                            input_map={'ExpandDims:0':input_tensor})
   # Works with an arbitrary minibatch size.
   with tf.Session() as sess:
     pool3 = sess.graph.get_tensor_by_name('pool_3:0')
