@@ -6,6 +6,7 @@ import glob
 import time
 import pathlib
 import imageio
+import sys
 import numpy as np
 import fid
 import inception as iscore
@@ -20,8 +21,6 @@ import data
 
 import pdb
 
-CIFAR_FNAME = '/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz'
-
 class optclass:
     workaround = True
 
@@ -34,7 +33,8 @@ def calc_cifar():
         'dev_batch_size': 100,
         'size_labeled_data': 4000,
         'train_batch_size': 100,
-        'train_batch_size_2': 100
+        'train_batch_size_2': 100,
+        'cifar_fname': '/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz'
     }
     for k, v in optdict.items():
         setattr(optinst, k, v)
@@ -56,7 +56,7 @@ def calc_cifar():
     
     mfid, sfid = fid_ms_for_imgs(images)
     
-    np.savez(CIFAR_FNAME, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+    np.savez(opt.cifar_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
     
     
     
@@ -73,9 +73,10 @@ def fid_ms_for_imgs(images, mem_fraction=1):
 def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
     visdom_score_visual_id = None
     vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
-    data_stats = np.load(CIFAR_FNAME)
+    data_stats = np.load(opt.cifar_fname)
     last_itr = -1
     lf = os.path.join(opt.outf, listen_file)
+    slept_last_itr = False
     if not opt.run_scoring_now:
         if os.path.isfile(lf):
             f = open(lf,'r')
@@ -96,6 +97,8 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
             f.close()
         
         if now_itr != last_itr:
+            sys.stdout.write('\nWaking\n')
+            slept_last_itr = False
             last_itr = now_itr
             path = os.path.join(opt.outf, 'GAN_OUTPUTS')
             path = pathlib.Path(path)
@@ -118,7 +121,12 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
                 
             del x #clean up memory
         else:
+            if slept_last_itr:
+                sys.stdout.write('.')
+            else:
+                sys.stdout.write('Sleeping')
             time.sleep(5)
+            slept_last_itr = True
                 
             
     
@@ -132,6 +140,7 @@ if __name__ == '__main__':
     parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
     parser.add_argument('--run_scoring_now', type=bool, default=False)
     parser.add_argument('--tfmem', default=0.5, type=float, help="What fraction of GPU memory tf should use.")
+    parser.add_argument('--cifar_fname', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
     
     opt = parser.parse_args()
     print(opt)

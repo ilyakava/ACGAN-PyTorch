@@ -10,6 +10,7 @@ import numpy as np
 import random
 import re
 from tqdm import tqdm
+import time
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -22,7 +23,7 @@ import torchvision.utils as vutils
 from torch.autograd import Variable
 import data
 from utils import weights_init, compute_acc, decimate
-from network import _netG, _netD, _netD_CIFAR10, _netG_CIFAR10
+from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
 
 import visdom
@@ -39,8 +40,10 @@ parser.add_argument('--imageSize', type=int, default=128, help='the height / wid
 parser.add_argument('--nz', type=int, default=110, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
+parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, ACGAN default=0.0002')
+parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. ACGAN default=0.5')
+parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for adam. ACGAN default=0.999')
+parser.add_argument('--ndis', type=int, default=1, help='Num discriminator steps. ACGAN default=1')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
@@ -129,7 +132,7 @@ if opt.netD == '' and netDfiles:
 if opt.dataset == 'imagenet':
     netG = _netG(ngpu, nz)
 else:
-    netG = _netG_CIFAR10(ngpu, nz)
+    netG = _netG_CIFAR10_SNGAN(ngpu, nz)
 netG.apply(weights_init)
 if opt.netG != '':
     print('Loading %s...' % opt.netG)
@@ -143,7 +146,7 @@ print(netG)
 if opt.dataset == 'imagenet':
     netD = _netD(ngpu, num_classes)
 else:
-    netD = _netD_CIFAR10(ngpu, num_classes)
+    netD = _netD_CIFAR10_SNGAN(ngpu, num_classes)
 netD.apply(weights_init)
 if opt.netD != '':
     print('Loading %s...' % opt.netD)
@@ -188,8 +191,8 @@ eval_noise_ = (torch.from_numpy(eval_noise_))
 eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz, 1, 1))
 
 # setup optimizer
-optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
+optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
 
 
 avg_loss_D = 0.0
@@ -204,68 +207,75 @@ delete_idx = cycle([1,2,3])
 saved_eval_itrs = []
 saved_train_itrs = []
 latest_save = None
+this_run_iters = 0
+this_run_seconds = 0
 
 while True:
     curr_iter += 1
-    ############################
-    # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-    ###########################
-    # train with real
-    netD.zero_grad()
-    real_cpu, label = labeled_loader.next()
-    batch_size = real_cpu.size(0)
-    if opt.cuda:
-        real_cpu = real_cpu.cuda()
-    input.data.resize_as_(real_cpu).copy_(real_cpu)
-    dis_label.data.resize_(batch_size).fill_(real_label)
-    aux_label.data.resize_(batch_size).copy_(label)
-    dis_output, aux_output = netD(input)
+    this_run_iters +=1
+    this_iter_start = time.time()
+    for dis_step in range(opt.ndis):
+        ############################
+        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+        ###########################
+        # train with real
+        netD.zero_grad()
+        real_cpu, label = labeled_loader.next()
+        batch_size = real_cpu.size(0)
+        if opt.cuda:
+            real_cpu = real_cpu.cuda()
+        input.data.resize_as_(real_cpu).copy_(real_cpu)
+        dis_label.data.resize_(batch_size).fill_(real_label)
+        aux_label.data.resize_(batch_size).copy_(label)
+        dis_output, aux_output = netD(input)
 
-    dis_errD_real = dis_criterion(dis_output, dis_label)
-    aux_errD_real = aux_criterion(aux_output, aux_label)
-    errD_real = dis_errD_real + aux_errD_real
-    errD_real.backward()
-    D_x = dis_output.data.mean()
+        dis_errD_real = dis_criterion(dis_output, dis_label)
+        aux_errD_real = aux_criterion(aux_output, aux_label)
+        errD_real = dis_errD_real + aux_errD_real
+        errD_real.backward()
+        D_x = dis_output.data.mean()
 
-    # compute the current classification accuracy
-    accuracy = compute_acc(aux_output, aux_label)
+        # compute the current classification accuracy
+        accuracy = compute_acc(aux_output, aux_label)
 
-    # train with fake
-    noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
-    label = np.random.randint(0, num_classes, batch_size)
-    noise_ = np.random.normal(0, 1, (batch_size, nz))
-    if not opt.marygan:
-        class_onehot = np.zeros((batch_size, num_classes))
-        class_onehot[np.arange(batch_size), label] = 1
-        noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
-    noise_ = (torch.from_numpy(noise_))
-    noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
-    aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+        # train with fake
+        noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+        label = np.random.randint(0, num_classes, batch_size)
+        noise_ = np.random.normal(0, 1, (batch_size, nz))
+        if not opt.marygan:
+            class_onehot = np.zeros((batch_size, num_classes))
+            class_onehot[np.arange(batch_size), label] = 1
+            noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+        noise_ = (torch.from_numpy(noise_))
+        noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
+        aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
 
-    fake = netG(noise)
-    dis_label.data.fill_(fake_label)
-    dis_output, aux_output = netD(fake.detach())
-    dis_errD_fake = dis_criterion(dis_output, dis_label)
-    if opt.marygan:
-        errD_fake = dis_errD_fake
-    else:
-        aux_errD_fake = aux_criterion(aux_output, aux_label)
-        errD_fake = dis_errD_fake + aux_errD_fake
-    errD_fake.backward()
-    D_G_z1 = dis_output.data.mean()
-    
-    # train with unlabeled
-    unl_images, _ = unlabeled_loader.next()
-    if opt.cuda:
-        unl_images = unl_images.cuda()
-    input.data.copy_(unl_images)
-    dis_label.data.fill_(real_label)
-    dis_output, aux_output = netD(input)
-    dis_errD_unl = dis_criterion(dis_output, dis_label)
-    dis_errD_unl.backward()
+        fake = netG(noise)
+        dis_label.data.fill_(fake_label)
+        dis_output, aux_output = netD(fake.detach())
+        dis_errD_fake = dis_criterion(dis_output, dis_label)
+        if opt.marygan:
+            errD_fake = dis_errD_fake
+        else:
+            aux_errD_fake = aux_criterion(aux_output, aux_label)
+            errD_fake = dis_errD_fake + aux_errD_fake
+        errD_fake.backward()
+        D_G_z1 = dis_output.data.mean()
+        errD = errD_real + errD_fake
+        
+        if unlabeled_loader:
+            # train with unlabeled
+            unl_images, _ = unlabeled_loader.next()
+            if opt.cuda:
+                unl_images = unl_images.cuda()
+            input.data.copy_(unl_images)
+            dis_label.data.fill_(real_label)
+            dis_output, aux_output = netD(input)
+            dis_errD_unl = dis_criterion(dis_output, dis_label)
+            dis_errD_unl.backward()
+            errD += dis_errD_unl
 
-    errD = errD_real + errD_fake + dis_errD_unl
-    optimizerD.step()
+        optimizerD.step()
 
     ############################
     # (2) Update G network: maximize log(D(G(z)))
@@ -294,8 +304,10 @@ while True:
     avg_loss_D = all_loss_D / (curr_iter + 1)
     avg_loss_A = all_loss_A / (curr_iter + 1)
 
-    print('[%06d] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
-          % (curr_iter,
+    this_run_seconds += (time.time() - this_iter_start)
+
+    print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
+          % (curr_iter, curr_iter / this_run_seconds,
              errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
     
     ### Save GAN Images to interface with IS and FID scores
