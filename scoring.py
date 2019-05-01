@@ -98,12 +98,11 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
         
         if now_itr != last_itr:
             sys.stdout.write('\nWaking\n')
+            sys.stdout.flush()
             slept_last_itr = False
             last_itr = now_itr
-            path = os.path.join(opt.outf, 'GAN_OUTPUTS')
-            path = pathlib.Path(path)
-            files = list(path.glob('*.png'))
-            x = np.array([imageio.imread(str(fn)).astype(np.float32) for fn in files])
+            path = os.path.join(opt.outf, 'GAN_OUTPUTS', 'out.npy')
+            x = np.load(path)
         
             mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
             print('[%06d] IS mu: %f. IS sigma: %f.' % (now_itr, mis, sis))
@@ -123,8 +122,10 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
         else:
             if slept_last_itr:
                 sys.stdout.write('.')
+                sys.stdout.flush()
             else:
                 sys.stdout.write('Sleeping')
+                sys.stdout.flush()
             time.sleep(5)
             slept_last_itr = True
                 

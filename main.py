@@ -314,6 +314,7 @@ while True:
     if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
         opt.run_scoring_now = False
         n_used_imgs = 50000
+        all_fakes = np.empty((n_used_imgs,32,32,3), dtype=np.uint8)
         if not os.path.exists('%s/GAN_OUTPUTS' % (opt.outf)):
             os.makedirs('%s/GAN_OUTPUTS' % (opt.outf))
         # save a bunch of GAN images
@@ -331,12 +332,12 @@ while True:
                 noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
             noise_ = (torch.from_numpy(noise_))
             noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
-            fake = netG(noise).data.cpu()
+            fake = netG(noise).data.cpu().numpy()
             
-            fake = (fake + 1) / 2.0
-            for j in range(opt.train_batch_size):
-                vutils.save_image(fake[j],'%s/GAN_OUTPUTS/gan_out_%05d.png' % (opt.outf, start + j), normalize=False)
+            fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
+            all_fakes[start:end] = np.moveaxis(fake,1,-1)
 
+        np.save('%s/GAN_OUTPUTS/out.npy' % (opt.outf), all_fakes)
         with open('%s/scoring.info' % opt.outf,'w') as f:
             f.write(str(curr_iter))
 
