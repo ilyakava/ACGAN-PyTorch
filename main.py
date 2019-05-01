@@ -13,6 +13,7 @@ from tqdm import tqdm
 import time
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
@@ -25,6 +26,7 @@ import data
 from utils import weights_init, compute_acc, decimate
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
+from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet
 
 import visdom
 import imageio
@@ -36,12 +38,13 @@ parser.add_argument('--dataset', required=True, help='cifar | imagenet')
 parser.add_argument('--data_root', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
 parser.add_argument('--train_batch_size', type=int, default=1, help='input batch size')
-parser.add_argument('--imageSize', type=int, default=128, help='the height / width of the input image to network')
+parser.add_argument('--imageSize', type=int, default=32, help='the height / width of the input image to network')
+parser.add_argument('--nc', type=int, default=3)
 parser.add_argument('--nz', type=int, default=110, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, ACGAN default=0.0002')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. ACGAN default=0.5')
+# parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, ACGAN default=0.0002')
+parser.add_argument('--beta1', type=float, default=0.0, help='beta1 for adam. ACGAN default=0.5')
 parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for adam. ACGAN default=0.999')
 parser.add_argument('--ndis', type=int, default=1, help='Num discriminator steps. ACGAN default=1')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
@@ -65,8 +68,21 @@ parser.add_argument('--size_labeled_data',  type=int, default=4000)
 parser.add_argument('--dev_batch_size',  type=int, default=None)
 parser.add_argument('--train_batch_size_2',  type=int, default=None)
 
+# for GAN_training folder
+parser.add_argument('--GAN_lrG', type=float, default=0.0001, help='learning rate, default=0.0002')
+parser.add_argument('--GAN_lrD', type=float, default=0.0004, help='learning rate, default=0.0002')
+parser.add_argument('--GAN_disc_loss_type', default='hinge', help='which disc loss to use| hinge, wasserstein, ns')
+
 opt = parser.parse_args()
 print(opt)
+
+# for GAN_training folder
+opt.GAN_nz = opt.nz
+opt.GAN_ngf = opt.ngf
+opt.GAN_ndf = opt.ndf
+opt.GAN_disc_iters = opt.ndis
+opt.GAN_beta1 = opt.beta1
+opt.batchSize = opt.train_batch_size
 
 # setup visdom
 vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
@@ -98,6 +114,7 @@ cudnn.benchmark = True
 
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+device = torch.device("cuda:0" if opt.cuda else "cpu")
 
 # some hyper parameters
 ngpu = int(opt.ngpu)
@@ -132,8 +149,8 @@ if opt.netD == '' and netDfiles:
 if opt.dataset == 'imagenet':
     netG = _netG(ngpu, nz)
 else:
-    netG = _netG_CIFAR10_SNGAN(ngpu, nz)
-netG.apply(weights_init)
+    netG = resnet.Generator(opt)
+# netG.apply(weights_init)
 if opt.netG != '':
     print('Loading %s...' % opt.netG)
     netG.load_state_dict(torch.load(opt.netG))
@@ -146,21 +163,24 @@ print(netG)
 if opt.dataset == 'imagenet':
     netD = _netD(ngpu, num_classes)
 else:
-    netD = _netD_CIFAR10_SNGAN(ngpu, num_classes)
-netD.apply(weights_init)
+    netD = resnet.Discriminator(opt)
+# netD.apply(weights_init)
 if opt.netD != '':
     print('Loading %s...' % opt.netD)
     netD.load_state_dict(torch.load(opt.netD))
 print(netD)
 
 # loss functions
-dis_criterion = nn.BCELoss()
+def dis_criterion(inputs, labels):
+    # hinge loss
+    return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
+# dis_criterion = nn.BCELoss()
 aux_criterion = nn.NLLLoss()
 
 # tensor placeholders
 input = torch.FloatTensor(opt.train_batch_size, 3, opt.imageSize, opt.imageSize)
-noise = torch.FloatTensor(opt.train_batch_size, nz, 1, 1)
-eval_noise = torch.FloatTensor(opt.train_batch_size, nz, 1, 1).normal_(0, 1)
+noise = torch.FloatTensor(opt.train_batch_size, nz)
+eval_noise = torch.FloatTensor(opt.train_batch_size, nz).normal_(0, 1)
 dis_label = torch.FloatTensor(opt.train_batch_size)
 aux_label = torch.LongTensor(opt.train_batch_size)
 real_label = 1
@@ -168,9 +188,9 @@ fake_label = 0
 
 # if using cuda
 if opt.cuda:
-    netD.cuda()
-    netG.cuda()
-    dis_criterion.cuda()
+    netG = netG.to(device)
+    netD = netD.to(device)
+    # dis_criterion.cuda()
     aux_criterion.cuda()
     input, dis_label, aux_label = input.cuda(), dis_label.cuda(), aux_label.cuda()
     noise, eval_noise = noise.cuda(), eval_noise.cuda()
@@ -188,11 +208,11 @@ eval_onehot = np.zeros((opt.train_batch_size, num_classes))
 eval_onehot[np.arange(opt.train_batch_size), eval_label] = 1
 eval_noise_[np.arange(opt.train_batch_size), :num_classes] = eval_onehot[np.arange(opt.train_batch_size)]
 eval_noise_ = (torch.from_numpy(eval_noise_))
-eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz, 1, 1))
+eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz))
 
 # setup optimizer
-optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
-optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
+optimizerD = optim.Adam(netD.parameters(), lr=opt.GAN_lrD, betas=(opt.beta1, opt.beta2))
+optimizerG = optim.Adam(netG.parameters(), lr=opt.GAN_lrG, betas=(opt.beta1, opt.beta2))
 
 
 avg_loss_D = 0.0
@@ -210,13 +230,14 @@ latest_save = None
 this_run_iters = 0
 this_run_seconds = 0
 
+
 while True:
     curr_iter += 1
     this_run_iters +=1
     this_iter_start = time.time()
     for dis_step in range(opt.ndis):
         ############################
-        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+        # (1) Update D network
         ###########################
         # train with real
         netD.zero_grad()
@@ -239,7 +260,7 @@ while True:
         accuracy = compute_acc(aux_output, aux_label)
 
         # train with fake
-        noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+        noise.data.resize_(batch_size, nz).normal_(0, 1)
         label = np.random.randint(0, num_classes, batch_size)
         noise_ = np.random.normal(0, 1, (batch_size, nz))
         if not opt.marygan:
@@ -247,7 +268,7 @@ while True:
             class_onehot[np.arange(batch_size), label] = 1
             noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
         noise_ = (torch.from_numpy(noise_))
-        noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
+        noise.data.copy_(noise_.view(batch_size, nz))
         aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
 
         fake = netG(noise)
@@ -278,7 +299,7 @@ while True:
         optimizerD.step()
 
     ############################
-    # (2) Update G network: maximize log(D(G(z)))
+    # (2) Update G network
     ###########################
     netG.zero_grad()
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
@@ -323,7 +344,7 @@ while True:
             end = start + opt.train_batch_size
 
             # fake
-            noise.data.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+            noise.data.resize_(batch_size, nz).normal_(0, 1)
             label = np.random.randint(0, num_classes, batch_size)
             noise_ = np.random.normal(0, 1, (batch_size, nz))
             if not opt.marygan:
@@ -331,7 +352,7 @@ while True:
                 class_onehot[np.arange(batch_size), label] = 1
                 noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
             noise_ = (torch.from_numpy(noise_))
-            noise.data.copy_(noise_.view(batch_size, nz, 1, 1))
+            noise.data.copy_(noise_.view(batch_size, nz))
             fake = netG(noise).data.cpu().numpy()
             
             fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
