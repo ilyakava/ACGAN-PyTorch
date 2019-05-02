@@ -153,7 +153,6 @@ class Discriminator(nn.Module):
             SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
         )
         self.disc_net.apply(utils.weights_init_spectral)
-        self.sofmax = nn.Softmax()
 
     def forward(self, input):
         if self.ngpu > 1:
@@ -165,7 +164,7 @@ class Discriminator(nn.Module):
             disc_logits = self.disc_net(feat)
             aux_logits = self.aux_net(feat)
 
-        return disc_logits.view(-1, 1).squeeze(1), softmax(aux_logits).squeeze()
+        return disc_logits.view(-1, 1).squeeze(1), aux_logits.squeeze()
 
 
 class Encoder(nn.Module):

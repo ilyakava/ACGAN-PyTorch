@@ -175,7 +175,7 @@ def dis_criterion(inputs, labels):
     # hinge loss
     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
 # dis_criterion = nn.BCELoss()
-aux_criterion = nn.NLLLoss()
+aux_criterion = nn.CrossEntropyLoss()
 
 # tensor placeholders
 input = torch.FloatTensor(opt.train_batch_size, 3, opt.imageSize, opt.imageSize)
