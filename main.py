@@ -73,6 +73,10 @@ parser.add_argument('--GAN_lrG', type=float, default=0.0001, help='learning rate
 parser.add_argument('--GAN_lrD', type=float, default=0.0004, help='learning rate, default=0.0002')
 parser.add_argument('--GAN_disc_loss_type', default='hinge', help='which disc loss to use| hinge, wasserstein, ns')
 
+parser.add_argument('--aux_scale_G', type=float, default=0.1, help='WGAN default=0.1')
+parser.add_argument('--aux_scale_D', type=float, default=1.0, help='WGAN default=1.0')
+
+
 opt = parser.parse_args()
 print(opt)
 
@@ -175,7 +179,7 @@ def dis_criterion(inputs, labels):
     # hinge loss
     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
 # dis_criterion = nn.BCELoss()
-aux_criterion = nn.CrossEntropyLoss()
+aux_criterion = nn.NLLLoss()
 
 # tensor placeholders
 input = torch.FloatTensor(opt.train_batch_size, 3, opt.imageSize, opt.imageSize)
@@ -252,7 +256,7 @@ while True:
 
         dis_errD_real = dis_criterion(dis_output, dis_label)
         aux_errD_real = aux_criterion(aux_output, aux_label)
-        errD_real = dis_errD_real + aux_errD_real
+        errD_real = dis_errD_real + opt.aux_scale_D * aux_errD_real
         errD_real.backward()
         D_x = dis_output.data.mean()
 
@@ -279,7 +283,7 @@ while True:
             errD_fake = dis_errD_fake
         else:
             aux_errD_fake = aux_criterion(aux_output, aux_label)
-            errD_fake = dis_errD_fake + aux_errD_fake
+            errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
         errD_fake.backward()
         D_G_z1 = dis_output.data.mean()
         errD = errD_real + errD_fake
@@ -309,7 +313,7 @@ while True:
         aux_errG = -torch.mean(aux_output.max(1)[0])
     else:
         aux_errG = aux_criterion(aux_output, aux_label)
-    errG = dis_errG + aux_errG
+    errG = dis_errG + opt.aux_scale_G * aux_errG
     errG.backward()
     D_G_z2 = dis_output.data.mean()
     optimizerG.step()
@@ -328,7 +332,7 @@ while True:
     this_run_seconds += (time.time() - this_iter_start)
 
     print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
-          % (curr_iter, curr_iter / this_run_seconds,
+          % (curr_iter, this_run_iters / this_run_seconds,
              errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
     
     ### Save GAN Images to interface with IS and FID scores
