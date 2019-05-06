@@ -2,6 +2,8 @@
 from __future__ import absolute_import, division, print_function
 import argparse
 import os
+import re
+from collections import defaultdict
 import glob
 import time
 import pathlib
@@ -16,6 +18,8 @@ from torchvision.datasets import CIFAR10
 import torch
 import visdom
 from torchvision import transforms
+from GAN_training.models import resnet
+from tqdm import tqdm
 
 import data
 
@@ -128,7 +132,115 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
                 sys.stdout.flush()
             time.sleep(5)
             slept_last_itr = True
+
+HIST_FNAME = 'scoring_hist.npy'
+def cifar_batch(opt):
+    num_classes = 10
+    print('running cifar batch')
+    data_stats = np.load(opt.cifar_fname)
+    
+    # make/load history files in each
+    def load_or_make_hist(d):
+        if not os.path.isdir(d):
+            raise Exception('%s is not a valid directory' % d)
+        f = os.path.join(d, HIST_FNAME)
+        if os.path.isfile(f):
+            return np.load(f, allow_pickle=True).item()
+        else:
+            return defaultdict(dict)
+    full_paths = [os.path.join(opt.outf, d) for d in opt.dirs.split(' ')]
+    cps = [int(c) for c in opt.checkpoints.split(' ')]
+    hists = [defaultdict(dict) for d in full_paths]
+    #hists = [load_or_make_hist(d) for d in full_paths]
+    legend = [os.path.split(d)[-1] for d in full_paths]
+    
+    #pdb.set_trace()
+    
+    netG = resnet.Generator(opt)
+    # check everything exists
+    sys.stdout.write('Checking all files exist')
+    for i, d in enumerate(full_paths):
+        for j, c in enumerate(cps):
+            mfG = os.path.join(d, 'netG_iter_%06d.pth' % c)
+            if not os.path.isfile(mfG):
+                print('File %s NOT FOUND' % mfG)
+            else:
+                try:
+                    netG.load_state_dict(torch.load(mfG))
+                except:
+                    print('Failed to load %s' % mfG)
+                    netG.load_state_dict(torch.load(mfG))
+                sys.stdout.write('.')
+                sys.stdout.flush()
+    
+    # setup visdom for monitoring
+    visdom_IS_visual_id = None
+    visdom_FID_visual_id = None
+    vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
+    
+    # loop through files
+    display_IS = np.zeros((len(full_paths), len(cps)))
+    display_FID = np.zeros((len(full_paths), len(cps)))
+    for i, d in enumerate(full_paths):
+        for j, c in enumerate(cps):
+            mfG = os.path.join(d, 'netG_iter_%06d.pth' % c)
+            if ('IS' in hists[i][c]):
+                pass
+            elif os.path.isfile(mfG):
+                # find and load the model
                 
+                netG = resnet.Generator(opt)
+                netG.load_state_dict(torch.load(mfG))
+                netG = netG.cuda()
+
+                batch_size = opt.train_batch_size
+                nz = opt.nz
+                noise = torch.FloatTensor(opt.train_batch_size, nz)
+                noise = noise.cuda()
+
+                # create images
+                n_used_imgs = 50000
+                x = np.empty((n_used_imgs,32,32,3), dtype=np.uint8)
+                # create a bunch of GAN images
+                for l in  tqdm(range(n_used_imgs // opt.train_batch_size),desc='Generating'):
+                    start = l * opt.train_batch_size
+                    end = start + opt.train_batch_size
+
+                    noise.data.resize_(batch_size, nz).normal_(0, 1)
+                    label = np.random.randint(0, num_classes, batch_size)
+                    noise_ = np.random.normal(0, 1, (batch_size, nz))
+                    
+                    if not re.findall('marygan', legend[i]):
+                        class_onehot = np.zeros((batch_size, num_classes))
+                        class_onehot[np.arange(batch_size), label] = 1
+                        noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+                    noise_ = (torch.from_numpy(noise_))
+                    noise.data.copy_(noise_.view(batch_size, nz))
+                    fake = netG(noise).data.cpu().numpy()
+
+                    fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
+                    x[start:end] = np.moveaxis(fake,1,-1)
+                # scoring starts
+                mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
+                print('[%06d] IS mu: %f. IS sigma: %f.' % (c, mis, sis))
+
+                m1, s1 = fid_ms_for_imgs(x, mem_fraction=opt.tfmem)
+                fid_value = fid.calculate_frechet_distance(m1, s1, data_stats['mfid'], data_stats['sfid'])
+                print('[%s][%06d] FID: %f' % (legend[i], c, fid_value))
+
+                hists[i][c]['IS'] = [mis, sis]
+                hists[i][c]['FID'] = fid_value
+                np.save(os.path.join(d, HIST_FNAME), hists[i])
+            if ('IS' in hists[i][c]) and (type(hists[i][c]['IS']) is list) and len(hists[i][c]['IS']):
+                display_IS[i,j] = hists[i][c]['IS'][0]
+            if ('FID' in hists[i][c]):
+                display_IS[i,j] = hists[i][c]['FID']
+
+            
+            # show in visdom
+            visdom_IS_visual_id = vis.line(display_IS.T, cps, win=visdom_IS_visual_id, opts={'legend': legend, 'title': 'IS Scores'})
+            visdom_FID_visual_id = vis.line(display_FID.T, cps, win=visdom_FID_visual_id, opts={'legend': legend, 'title': 'FID Scores'})
+            
             
     
     
@@ -142,12 +254,33 @@ if __name__ == '__main__':
     parser.add_argument('--run_scoring_now', type=bool, default=False)
     parser.add_argument('--tfmem', default=0.5, type=float, help="What fraction of GPU memory tf should use.")
     parser.add_argument('--cifar_fname', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
+    parser.add_argument('--mode', default='listen', help='listen | batch')
+    parser.add_argument('--dirs', help='For batch mode, use space to separate list')
+    parser.add_argument('--checkpoints', help='For batch mode, use space to separate list')
+    
+    # for batch mode from main.py
+    parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
+    parser.add_argument('--nz', type=int, default=128, help='size of the latent z vector')
+    parser.add_argument('--ngf', type=int, default=64)
+    parser.add_argument('--ndf', type=int, default=64)
+
     
     opt = parser.parse_args()
     print(opt)
     
-    if opt.dataset == 'cifar':
+    opt.GAN_nz = opt.nz
+    opt.GAN_ngf = opt.ngf
+    opt.GAN_ndf = opt.ndf
+#     opt.GAN_disc_iters = opt.ndis
+#     opt.GAN_beta1 = opt.beta1
+    opt.batchSize = opt.train_batch_size
+    opt.ngpu = 1
+    opt.nc = 3
+    
+    if opt.dataset == 'cifar' and opt.mode == 'listen':
         cifar_listen(opt)
+    elif opt.dataset == 'cifar' and opt.mode == 'batch':
+        cifar_batch(opt)
     else:
         raise NotImplementedError("No such dataset {}".format(opt.dataset))
 
