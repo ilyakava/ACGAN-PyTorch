@@ -1,7 +1,7 @@
 
 import numpy as np
 import torch
-from torchvision.datasets import MNIST, SVHN, CIFAR10
+from torchvision.datasets import MNIST, SVHN, CIFAR10, STL10
 from torchvision import transforms
 import torchvision.utils as vutils
 
@@ -49,7 +49,7 @@ class DataLoader(object):
             indices = np.arange(self.images.size(0))
             np.random.shuffle(indices)
             indices = torch.from_numpy(indices)
-            for start in range(0, indices.size(0), self.batch_size):
+            for start in range(0, indices.size(0) - self.batch_size, self.batch_size):
                 end = min(start + self.batch_size, indices.size(0))
                 ret_images, ret_labels = self.images[indices[start: end]], self.labels[indices[start: end]]
                 yield ret_images, ret_labels
@@ -135,13 +135,16 @@ def get_cifar_loaders(config):
     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
     for i in range(10):
         mask[np.where(labels == i)[0][: int(config.size_labeled_data / 10)]] = True
-    # labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
-    labeled_indices, unlabeled_indices = indices[mask], indices
+    labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
+    # labeled_indices, unlabeled_indices = indices[mask], indices
     print ('labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], 'dev size', len(dev_set))
+    unlabeled_loader = None
+    unlabeled_loader2 = None
 
     labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
-    unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
-    unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    if unlabeled_indices.shape[0]:
+        unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+        unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
     dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
 
     special_set = []
@@ -151,3 +154,24 @@ def get_cifar_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
+def get_stl_loaders(config):
+    transform = transforms.Compose([transforms.Resize(config.imageSize), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    training_set = STL10(config.data_root, split='train', download=True, transform=transform)
+    dev_set = STL10(config.data_root, split='test', download=True, transform=transform)
+    unl_set = STL10(config.data_root, split='unlabeled', download=True, transform=transform)
+
+    print ('labeled size', len(training_set), 'unlabeled size', len(unl_set), 'dev size', len(dev_set))
+
+    indices = np.arange(len(training_set))
+    labeled_loader = DataLoader(config, training_set, indices, config.train_batch_size)
+    unlabeled_loader = DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    unlabeled_loader2 = DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+
+    labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+    special_set = []
+    for i in range(10):
+        special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
