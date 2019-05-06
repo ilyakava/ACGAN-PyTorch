@@ -4,7 +4,6 @@ Code modified from PyTorch DCGAN examples: https://github.com/pytorch/examples/t
 from __future__ import print_function
 import argparse
 import glob
-from itertools import cycle
 import os
 import numpy as np
 import random
@@ -75,6 +74,8 @@ parser.add_argument('--GAN_disc_loss_type', default='hinge', help='which disc lo
 
 parser.add_argument('--aux_scale_G', type=float, default=0.1, help='WGAN default=0.1')
 parser.add_argument('--aux_scale_D', type=float, default=1.0, help='WGAN default=1.0')
+parser.add_argument('--max_itr', type=int, default=1e10)
+parser.add_argument('--save_period', type=int, default=10000)
 
 
 opt = parser.parse_args()
@@ -134,9 +135,12 @@ if not opt.train_batch_size_2:
 
 # dataset
 if opt.dataset == 'cifar':
-    labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = data.get_cifar_loaders(opt)
+    metaloader = data.get_cifar_loaders
+elif opt.dataset == 'stl':
+    metaloader = data.get_stl_loaders
 else:
     raise NotImplementedError("No such dataset {}".format(opt.dataset))
+labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = metaloader(opt)
 
 # check outf for files
 netGfiles = glob.glob(os.path.join(opt.outf, 'netG_iter_*.pth'))
@@ -227,15 +231,12 @@ history_times = []
 score_history = []
 score_history_times = []
 
-delete_idx = cycle([1,2,3])
-saved_eval_itrs = []
-saved_train_itrs = []
 latest_save = None
 this_run_iters = 0
 this_run_seconds = 0
 
 
-while True:
+while curr_iter <= opt.max_itr:
     curr_iter += 1
     this_run_iters +=1
     this_iter_start = time.time()
@@ -444,30 +445,18 @@ while True:
         # done plotting, update ids
         visdom_visuals_ids = new_ids
 
-
-        # do checkpointing
-        # funny saving protocol to only ever write 5 historical files
-        last_save = saved_eval_itrs[-1] if saved_eval_itrs else 0.5
-        eval_itr = len(history)
-        if last_save*2 == eval_itr:
-            saved_eval_itrs.append(eval_itr)
-            saved_train_itrs.append(curr_iter)
-
-            torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
-            torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
-            vutils.save_image(fake.data,'%s/fake_samples_iter_%06d.png' % (opt.outf, curr_iter))
-
-            if len(saved_eval_itrs) > 5:
-                ditr = saved_train_itrs.pop(next(delete_idx))
-                os.remove('%s/netG_iter_%06d.pth' % (opt.outf, ditr))
-                os.remove('%s/netD_iter_%06d.pth' % (opt.outf, ditr))
-                os.remove('%s/fake_samples_iter_%06d.png' % (opt.outf, ditr))
-                
         # save latest
-        if latest_save and (latest_save not in saved_train_itrs):
+        if latest_save:
             os.remove('%s/netG_iter_%06d.pth' % (opt.outf, latest_save))
             os.remove('%s/netD_iter_%06d.pth' % (opt.outf, latest_save))
         torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
         torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
         latest_save = curr_iter
 
+    # do historical checkpointing
+    if curr_iter % opt.save_period == (opt.save_period - 1):
+        torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
+        torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
+        vutils.save_image(fake.data,'%s/fake_samples_iter_%06d.png' % (opt.outf, curr_iter), normalize=True)
+
+print("Max iteration of %i reached. Quiting..." % opt.max_itr)
