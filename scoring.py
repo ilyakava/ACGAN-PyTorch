@@ -14,11 +14,11 @@ import fid
 import inception as iscore
 import imageio
 import tensorflow as tf
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, STL10
 import torch
 import visdom
 from torchvision import transforms
-from GAN_training.models import resnet
+from GAN_training.models import resnet, resnet_extra, resnet_48
 from tqdm import tqdm
 
 import data
@@ -60,8 +60,43 @@ def calc_cifar():
     
     mfid, sfid = fid_ms_for_imgs(images)
     
-    np.savez(opt.cifar_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+    np.savez(optinst.cifar_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
     
+def calc_stl():
+    N = 50000
+    optinst = optclass()
+    optdict = {
+        'data_root': '/scratch0/ilya/locDoc/data/stl10',
+        'dataset': 'stl',
+        'dev_batch_size': 100,
+        'size_labeled_data': 4000,
+        'train_batch_size': 100,
+        'train_batch_size_2': 100,
+        'outdata_fname': '/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz'
+    }
+    for k, v in optdict.items():
+        setattr(optinst, k, v)
+
+    
+    training_set = STL10(optinst.data_root, split='unlabeled', download=True, transform=transforms.Lambda(lambda img: np.array(img)))
+    trainloader = torch.utils.data.DataLoader(training_set, batch_size=optinst.train_batch_size_2, shuffle=True, num_workers=2)
+    assert(len(trainloader) * optinst.train_batch_size_2 >= N)
+    images = np.empty((N,96,96,3))
+    for i, xy in enumerate(trainloader, 0):
+        x, _ = xy
+        start = i * optinst.train_batch_size_2
+        end = start + optinst.train_batch_size_2
+        images[start:end] = np.array(x)
+        if end >= N:
+            break
+
+    mis, sis = iscore.get_inception_score(images)
+    
+    print('IS: %f (+/- %f)' % (mis, sis))
+    
+    mfid, sfid = fid_ms_for_imgs(images)
+    
+    np.savez(optinst.outdata_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
     
     
 def fid_ms_for_imgs(images, mem_fraction=1):
@@ -134,10 +169,13 @@ def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
             slept_last_itr = True
 
 HIST_FNAME = 'scoring_hist.npy'
-def cifar_batch(opt):
+def batch_scores(opt):
     num_classes = 10
-    print('running cifar batch')
-    data_stats = np.load(opt.cifar_fname)
+    print('running batch scores')
+    if opt.dataset == 'cifar':
+        data_stats = np.load(opt.cifar_fname)
+    else:
+        data_stats = np.load(opt.stl_fname)
     
     # make/load history files in each
     def load_or_make_hist(d):
@@ -150,13 +188,18 @@ def cifar_batch(opt):
             return defaultdict(dict)
     full_paths = [os.path.join(opt.outf, d) for d in opt.dirs.split(' ')]
     cps = [int(c) for c in opt.checkpoints.split(' ')]
-    hists = [defaultdict(dict) for d in full_paths]
-    #hists = [load_or_make_hist(d) for d in full_paths]
+    #hists = [defaultdict(dict) for d in full_paths]
+    hists = [load_or_make_hist(d) for d in full_paths]
     legend = [os.path.split(d)[-1] for d in full_paths]
     
     #pdb.set_trace()
     
-    netG = resnet.Generator(opt)
+    if opt.imageSize == 32:
+        netG = resnet.Generator(opt)
+    elif opt.imageSize == 64:
+        netG = resnet_extra.Generator(opt)
+    elif opt.imageSize == 48:
+        netG = resnet_48.Generator(opt)
     # check everything exists
     sys.stdout.write('Checking all files exist')
     for i, d in enumerate(full_paths):
@@ -181,15 +224,20 @@ def cifar_batch(opt):
     # loop through files
     display_IS = np.zeros((len(full_paths), len(cps)))
     display_FID = np.zeros((len(full_paths), len(cps)))
-    for i, d in enumerate(full_paths):
-        for j, c in enumerate(cps):
+    for j, c in enumerate(cps):
+        for i, d in enumerate(full_paths):
             mfG = os.path.join(d, 'netG_iter_%06d.pth' % c)
-            if ('IS' in hists[i][c]):
+            if ('IS' in hists[i][c]) and not opt.overwrite:
                 pass
             elif os.path.isfile(mfG):
                 # find and load the model
                 
-                netG = resnet.Generator(opt)
+                if opt.imageSize == 32:
+                    netG = resnet.Generator(opt)
+                elif opt.imageSize == 64:
+                    netG = resnet_extra.Generator(opt)
+                elif opt.imageSize == 48:
+                    netG = resnet_48.Generator(opt)
                 netG.load_state_dict(torch.load(mfG))
                 netG = netG.cuda()
 
@@ -200,7 +248,7 @@ def cifar_batch(opt):
 
                 # create images
                 n_used_imgs = 50000
-                x = np.empty((n_used_imgs,32,32,3), dtype=np.uint8)
+                x = np.empty((n_used_imgs,opt.imageSize,opt.imageSize,3), dtype=np.uint8)
                 # create a bunch of GAN images
                 for l in  tqdm(range(n_used_imgs // opt.train_batch_size),desc='Generating'):
                     start = l * opt.train_batch_size
@@ -254,15 +302,19 @@ if __name__ == '__main__':
     parser.add_argument('--run_scoring_now', type=bool, default=False)
     parser.add_argument('--tfmem', default=0.5, type=float, help="What fraction of GPU memory tf should use.")
     parser.add_argument('--cifar_fname', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
+    parser.add_argument('--stl_fname', default='/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz', help='cifar raw data IS FID stats')
     parser.add_argument('--mode', default='listen', help='listen | batch')
     parser.add_argument('--dirs', help='For batch mode, use space to separate list')
     parser.add_argument('--checkpoints', help='For batch mode, use space to separate list')
+    parser.add_argument('--overwrite', type=bool, default=False, help="Include this argument to overwrite batch perf, otherwise omit it")
+
     
     # for batch mode from main.py
     parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
     parser.add_argument('--nz', type=int, default=128, help='size of the latent z vector')
     parser.add_argument('--ngf', type=int, default=64)
     parser.add_argument('--ndf', type=int, default=64)
+    parser.add_argument('--imageSize', type=int, default=32, help='the height / width of the input image to network')
 
     
     opt = parser.parse_args()
@@ -279,8 +331,8 @@ if __name__ == '__main__':
     
     if opt.dataset == 'cifar' and opt.mode == 'listen':
         cifar_listen(opt)
-    elif opt.dataset == 'cifar' and opt.mode == 'batch':
-        cifar_batch(opt)
+    elif opt.mode == 'batch':
+        batch_scores(opt)
     else:
         raise NotImplementedError("No such dataset {}".format(opt.dataset))
 
