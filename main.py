@@ -25,7 +25,7 @@ import data
 from utils import weights_init, compute_acc, decimate
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
-from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet
+from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48
 
 import visdom
 import imageio
@@ -92,7 +92,13 @@ opt.batchSize = opt.train_batch_size
 # setup visdom
 vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
 visdom_visuals_ids = []
-empty_img = np.moveaxis(imageio.imread('404_32.png')[:,:,:3],-1,0) / 255.0
+if opt.imageSize == 32:
+    empty_img = np.moveaxis(imageio.imread('404_32.png')[:,:,:3],-1,0) / 255.0
+elif opt.imageSize == 64:
+    empty_img = np.moveaxis(imageio.imread('404_64.png')[:,:,:3],-1,0) / 255.0
+elif opt.imageSize == 48:
+    empty_img = np.moveaxis(imageio.imread('404_48.png')[:,:,:3],-1,0) / 255.0
+    
 def winid():
     """
     Pops first item on visdom_visuals_ids or returns none if it is empty
@@ -154,10 +160,14 @@ if opt.netD == '' and netDfiles:
     opt.netD = netDfiles[-1]
 
 # Define the generator and initialize the weights
-if opt.dataset == 'imagenet':
-    netG = _netG(ngpu, nz)
-else:
+if opt.imageSize == 32:
     netG = resnet.Generator(opt)
+elif opt.imageSize == 64:
+    netG = resnet_extra.Generator(opt)
+elif opt.imageSize == 48:
+    netG = resnet_48.Generator(opt)
+else:
+    raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
 # netG.apply(weights_init)
 if opt.netG != '':
     print('Loading %s...' % opt.netG)
@@ -168,10 +178,14 @@ else:
 print(netG)
 
 # Define the discriminator and initialize the weights
-if opt.dataset == 'imagenet':
-    netD = _netD(ngpu, num_classes)
-else:
+if opt.imageSize == 32:
     netD = resnet.Discriminator(opt)
+elif opt.imageSize == 64:
+    netD = resnet_extra.Discriminator(opt)
+elif opt.imageSize == 48:
+    netD = resnet_48.Discriminator(opt)
+else:
+    raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
 # netD.apply(weights_init)
 if opt.netD != '':
     print('Loading %s...' % opt.netD)
@@ -340,7 +354,7 @@ while curr_iter <= opt.max_itr:
     if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
         opt.run_scoring_now = False
         n_used_imgs = 50000
-        all_fakes = np.empty((n_used_imgs,32,32,3), dtype=np.uint8)
+        all_fakes = np.empty((n_used_imgs,opt.imageSize,opt.imageSize,3), dtype=np.uint8)
         if not os.path.exists('%s/GAN_OUTPUTS' % (opt.outf)):
             os.makedirs('%s/GAN_OUTPUTS' % (opt.outf))
         # save a bunch of GAN images

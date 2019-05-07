@@ -154,24 +154,48 @@ def get_cifar_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
+class MyLiteDataLoader(object):
+
+    def __init__(self, config, raw_loader, indices, batch_size):
+        self.unlimit_gen = self.generator(True)
+        self.raw_loader = raw_loader
+        self.bs = batch_size
+    
+    def generator(self, inf=False):
+        while True:
+            theloader = torch.utils.data.DataLoader(self.raw_loader, batch_size=self.bs, shuffle=True, num_workers=2,drop_last=True)
+            for xy in theloader:
+                x, y = xy
+                yield x, y
+            if not inf: break
+
+    def next(self):
+        return next(self.unlimit_gen)
+
+    def get_iter(self):
+        return self.generator()
+
+    def __len__(self):
+        return len(self.raw_loader)
+
 def get_stl_loaders(config):
     transform = transforms.Compose([transforms.Resize(config.imageSize), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
     training_set = STL10(config.data_root, split='train', download=True, transform=transform)
-    dev_set = STL10(config.data_root, split='test', download=True, transform=transform)
+    dev_set = []#STL10(config.data_root, split='test', download=True, transform=transform)
     unl_set = STL10(config.data_root, split='unlabeled', download=True, transform=transform)
 
     print ('labeled size', len(training_set), 'unlabeled size', len(unl_set), 'dev size', len(dev_set))
 
     indices = np.arange(len(training_set))
-    labeled_loader = DataLoader(config, training_set, indices, config.train_batch_size)
-    unlabeled_loader = DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
-    unlabeled_loader2 = DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
-    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+    labeled_loader = MyLiteDataLoader(config, training_set, indices, config.train_batch_size)
+    unlabeled_loader = MyLiteDataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    unlabeled_loader2 = None #DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    dev_loader = None #DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
 
     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
     special_set = []
-    for i in range(10):
-        special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
-    special_set = torch.stack(special_set)
+    #for i in range(10):
+    #    special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    #special_set = torch.stack(special_set)
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
