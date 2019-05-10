@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 import pdb
 
-MODEL_DIR = '/tmp/imagenet'
+MODEL_DIR = '/tmp/ilyak/imagenet'
 DATA_URL = 'http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz'
 softmax = None
 
