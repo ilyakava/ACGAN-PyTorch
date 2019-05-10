@@ -25,7 +25,7 @@ import data
 from utils import weights_init, compute_acc, decimate
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
-from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48
+from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48
 
 import visdom
 import imageio
@@ -53,6 +53,7 @@ parser.add_argument('--netD', default='', help="path to netD (to continue traini
 parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--num_classes', type=int, default=10, help='Number of classes for AC-GAN')
+parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
 
 parser.add_argument('--host', default='http://ramawks69', type=str, help="hostname/server visdom listener is on.")
 parser.add_argument('--port', default=8097, type=int, help="which port visdom should use.")
@@ -165,7 +166,10 @@ if opt.imageSize == 32:
 elif opt.imageSize == 64:
     netG = resnet_extra.Generator(opt)
 elif opt.imageSize == 48:
-    netG = resnet_48.Generator(opt)
+    if opt.net_type == 'flat':
+        netG = resnet_48_flat.Generator(opt)
+    else:
+        netG = resnet_48.Generator(opt)
 else:
     raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
 # netG.apply(weights_init)
@@ -183,7 +187,10 @@ if opt.imageSize == 32:
 elif opt.imageSize == 64:
     netD = resnet_extra.Discriminator(opt)
 elif opt.imageSize == 48:
-    netD = resnet_48.Discriminator(opt)
+    if opt.net_type == 'flat':
+        netD = resnet_48_flat.Discriminator(opt)
+    else:
+        netD = resnet_48.Discriminator(opt)
 else:
     raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
 # netD.apply(weights_init)
@@ -294,11 +301,14 @@ while curr_iter <= opt.max_itr:
         dis_label.data.fill_(fake_label)
         dis_output, aux_output = netD(fake.detach())
         dis_errD_fake = dis_criterion(dis_output, dis_label)
-        if opt.marygan:
-            errD_fake = dis_errD_fake
+        if opt.aux_scale_D > 0:
+            if opt.marygan:
+                errD_fake = dis_errD_fake
+            else:
+                aux_errD_fake = aux_criterion(aux_output, aux_label)
+                errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
         else:
-            aux_errD_fake = aux_criterion(aux_output, aux_label)
-            errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
+            errD_fake = dis_errD_fake
         errD_fake.backward()
         D_G_z1 = dis_output.data.mean()
         errD = errD_real + errD_fake
@@ -324,11 +334,14 @@ while curr_iter <= opt.max_itr:
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
     dis_output, aux_output = netD(fake)
     dis_errG = dis_criterion(dis_output, dis_label)
-    if opt.marygan:
-        aux_errG = -torch.mean(aux_output.max(1)[0])
+    if opt.aux_scale_G > 0:
+        if opt.marygan:
+            aux_errG = -torch.mean(aux_output.max(1)[0])
+        else:
+            aux_errG = aux_criterion(aux_output, aux_label)
+        errG = dis_errG + opt.aux_scale_G * aux_errG
     else:
-        aux_errG = aux_criterion(aux_output, aux_label)
-    errG = dis_errG + opt.aux_scale_G * aux_errG
+        errG = dis_errG
     errG.backward()
     D_G_z2 = dis_output.data.mean()
     optimizerG.step()

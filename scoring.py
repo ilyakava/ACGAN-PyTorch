@@ -18,7 +18,7 @@ from torchvision.datasets import CIFAR10, STL10
 import torch
 import visdom
 from torchvision import transforms
-from GAN_training.models import resnet, resnet_extra, resnet_48
+from GAN_training.models import resnet, resnet_extra, resnet_48_flat, resnet_48
 from tqdm import tqdm
 
 import data
@@ -38,7 +38,7 @@ def calc_cifar():
         'size_labeled_data': 4000,
         'train_batch_size': 100,
         'train_batch_size_2': 100,
-        'cifar_fname': '/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz'
+        'dataset_is_fid': '/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz'
     }
     for k, v in optdict.items():
         setattr(optinst, k, v)
@@ -60,28 +60,35 @@ def calc_cifar():
     
     mfid, sfid = fid_ms_for_imgs(images)
     
-    np.savez(optinst.cifar_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+    np.savez(optinst.dataset_is_fid, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
     
 def calc_stl():
+    print('Calculating STL IS and FID')
     N = 50000
     optinst = optclass()
     optdict = {
         'data_root': '/scratch0/ilya/locDoc/data/stl10',
+#         'data_root': '/fs/vulcan-scratch/ilyak/locDoc/data/stl10',
         'dataset': 'stl',
+        'imageSize': 48,
         'dev_batch_size': 100,
         'size_labeled_data': 4000,
         'train_batch_size': 100,
         'train_batch_size_2': 100,
-        'outdata_fname': '/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz'
+        'outdata_fname': '/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz',
+#         'outdata_fname': '/fs/vulcan-scratch/ilyak/locDoc/data/stl10/fid_is_scores.npz'
     }
     for k, v in optdict.items():
         setattr(optinst, k, v)
 
+    tform = transforms.Compose([
+        transforms.Resize(optinst.imageSize),
+        transforms.Lambda(lambda img: np.array(img))])
     
-    training_set = STL10(optinst.data_root, split='unlabeled', download=True, transform=transforms.Lambda(lambda img: np.array(img)))
+    training_set = STL10(optinst.data_root, split='unlabeled', download=True, transform=tform)
     trainloader = torch.utils.data.DataLoader(training_set, batch_size=optinst.train_batch_size_2, shuffle=True, num_workers=2)
     assert(len(trainloader) * optinst.train_batch_size_2 >= N)
-    images = np.empty((N,96,96,3))
+    images = np.empty((N,optinst.imageSize,optinst.imageSize,3))
     for i, xy in enumerate(trainloader, 0):
         x, _ = xy
         start = i * optinst.train_batch_size_2
@@ -112,7 +119,7 @@ def fid_ms_for_imgs(images, mem_fraction=1):
 def cifar_listen(opt, listen_file='scoring.info', write_file='scoring.npy'):
     visdom_score_visual_id = None
     vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
-    data_stats = np.load(opt.cifar_fname)
+    data_stats = np.load(opt.dataset_is_fid)
     last_itr = -1
     lf = os.path.join(opt.outf, listen_file)
     slept_last_itr = False
@@ -172,10 +179,7 @@ HIST_FNAME = 'scoring_hist.npy'
 def batch_scores(opt):
     num_classes = 10
     print('running batch scores')
-    if opt.dataset == 'cifar':
-        data_stats = np.load(opt.cifar_fname)
-    else:
-        data_stats = np.load(opt.stl_fname)
+    data_stats = np.load(opt.dataset_is_fid)
     
     # make/load history files in each
     def load_or_make_hist(d):
@@ -199,7 +203,10 @@ def batch_scores(opt):
     elif opt.imageSize == 64:
         netG = resnet_extra.Generator(opt)
     elif opt.imageSize == 48:
-        netG = resnet_48.Generator(opt)
+        if opt.net_type == 'flat':
+            netG = resnet_48_flat.Generator(opt)
+        else:
+            netG = resnet_48.Generator(opt)
     # check everything exists
     sys.stdout.write('Checking all files exist')
     for i, d in enumerate(full_paths):
@@ -227,8 +234,9 @@ def batch_scores(opt):
     for j, c in enumerate(cps):
         for i, d in enumerate(full_paths):
             mfG = os.path.join(d, 'netG_iter_%06d.pth' % c)
-            if ('IS' in hists[i][c]) and not opt.overwrite:
-                pass
+            if ('IS' in hists[i][c]) and ('FID' in hists[i][c]) and not opt.overwrite:
+                print('SKIPPING %s, values already computed' % mfG)
+                next
             elif os.path.isfile(mfG):
                 # find and load the model
                 
@@ -237,7 +245,10 @@ def batch_scores(opt):
                 elif opt.imageSize == 64:
                     netG = resnet_extra.Generator(opt)
                 elif opt.imageSize == 48:
-                    netG = resnet_48.Generator(opt)
+                    if opt.net_type == 'flat':
+                        netG = resnet_48_flat.Generator(opt)
+                    else:
+                        netG = resnet_48.Generator(opt)
                 netG.load_state_dict(torch.load(mfG))
                 netG = netG.cuda()
 
@@ -264,21 +275,27 @@ def batch_scores(opt):
                         noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
                     noise_ = (torch.from_numpy(noise_))
                     noise.data.copy_(noise_.view(batch_size, nz))
-                    fake = netG(noise).data.cpu().numpy()
+                    fake = netG(noise).detach().data.cpu().numpy()
 
                     fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
                     x[start:end] = np.moveaxis(fake,1,-1)
+                
                 # scoring starts
-                mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
-                print('[%06d] IS mu: %f. IS sigma: %f.' % (c, mis, sis))
+                if (not ('IS' in hists[i][c])) or opt.overwrite: 
+                    mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
+                    print('[%s][%06d] IS mu: %f. IS sigma: %f.' % (legend[i], c, mis, sis))
+                    hists[i][c]['IS'] = [mis, sis]
+                    np.save(os.path.join(d, HIST_FNAME), hists[i])
 
-                m1, s1 = fid_ms_for_imgs(x, mem_fraction=opt.tfmem)
-                fid_value = fid.calculate_frechet_distance(m1, s1, data_stats['mfid'], data_stats['sfid'])
-                print('[%s][%06d] FID: %f' % (legend[i], c, fid_value))
-
-                hists[i][c]['IS'] = [mis, sis]
-                hists[i][c]['FID'] = fid_value
-                np.save(os.path.join(d, HIST_FNAME), hists[i])
+                if (not ('FID' in hists[i][c])) or opt.overwrite: 
+                    m1, s1 = fid_ms_for_imgs(x, mem_fraction=opt.tfmem)
+                    fid_value = fid.calculate_frechet_distance(m1, s1, data_stats['mfid'], data_stats['sfid'])
+                    print('[%s][%06d] FID: %f' % (legend[i], c, fid_value))
+                    hists[i][c]['FID'] = fid_value
+                    np.save(os.path.join(d, HIST_FNAME), hists[i])
+            else:
+                print('SKIPPING %s, no file found' % mfG)
+                next
             if ('IS' in hists[i][c]) and (type(hists[i][c]['IS']) is list) and len(hists[i][c]['IS']):
                 display_IS[i,j] = hists[i][c]['IS'][0]
             if ('FID' in hists[i][c]):
@@ -301,13 +318,12 @@ if __name__ == '__main__':
     parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
     parser.add_argument('--run_scoring_now', type=bool, default=False)
     parser.add_argument('--tfmem', default=0.5, type=float, help="What fraction of GPU memory tf should use.")
-    parser.add_argument('--cifar_fname', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
-    parser.add_argument('--stl_fname', default='/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz', help='cifar raw data IS FID stats')
+    parser.add_argument('--dataset_is_fid', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
     parser.add_argument('--mode', default='listen', help='listen | batch')
     parser.add_argument('--dirs', help='For batch mode, use space to separate list')
     parser.add_argument('--checkpoints', help='For batch mode, use space to separate list')
     parser.add_argument('--overwrite', type=bool, default=False, help="Include this argument to overwrite batch perf, otherwise omit it")
-
+    parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
     
     # for batch mode from main.py
     parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
@@ -333,6 +349,8 @@ if __name__ == '__main__':
         cifar_listen(opt)
     elif opt.mode == 'batch':
         batch_scores(opt)
+    elif opt.mode == 'calc_stl':
+        calc_stl()
     else:
         raise NotImplementedError("No such dataset {}".format(opt.dataset))
 
