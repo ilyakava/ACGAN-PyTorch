@@ -3,4 +3,4 @@ outputs*
 *.sw[po]
 links.txt
 **/.ipynb_checkpoints/*
-
+figs/*
