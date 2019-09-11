@@ -1,7 +1,7 @@
 
 import numpy as np
 import torch
-from torchvision.datasets import MNIST, SVHN, CIFAR10, STL10
+from torchvision.datasets import MNIST, SVHN, CIFAR10, STL10, ImageFolder
 from torchvision import transforms
 import torchvision.utils as vutils
 
@@ -156,7 +156,7 @@ def get_cifar_loaders(config):
 
 class MyLiteDataLoader(object):
 
-    def __init__(self, config, raw_loader, indices, batch_size):
+    def __init__(self, raw_loader, batch_size):
         self.unlimit_gen = self.generator(True)
         self.raw_loader = raw_loader
         self.bs = batch_size
@@ -181,21 +181,39 @@ class MyLiteDataLoader(object):
 def get_stl_loaders(config):
     transform = transforms.Compose([transforms.Resize(config.imageSize), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
     training_set = STL10(config.data_root, split='train', download=True, transform=transform)
-    dev_set = []#STL10(config.data_root, split='test', download=True, transform=transform)
+    dev_set = STL10(config.data_root, split='test', download=True, transform=transform)
     unl_set = STL10(config.data_root, split='unlabeled', download=True, transform=transform)
 
     print ('labeled size', len(training_set), 'unlabeled size', len(unl_set), 'dev size', len(dev_set))
 
     indices = np.arange(len(training_set))
-    labeled_loader = MyLiteDataLoader(config, training_set, indices, config.train_batch_size)
-    unlabeled_loader = MyLiteDataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    labeled_loader = MyLiteDataLoader(training_set, config.train_batch_size)
+    unlabeled_loader = MyLiteDataLoader(unl_set, config.train_batch_size_2)
     unlabeled_loader2 = None #DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
-    dev_loader = None #DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+    dev_loader = MyLiteDataLoader(dev_set, config.dev_batch_size)
 
     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
     special_set = []
     #for i in range(10):
     #    special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
     #special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+def get_celeba_loaders(config):
+    transform=transforms.Compose([
+                        transforms.Resize((config.imageSize,config.imageSize)),
+                         #  transforms.CenterCrop(image_size),
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                       ])
+    training_set = ImageFolder(root=config.data_root, transform=transform)
+    print ('labeled size', len(training_set), 'unlabeled size', 0, 'dev size', 0)
+
+    labeled_loader = MyLiteDataLoader(training_set, config.train_batch_size)
+    unlabeled_loader = None
+    unlabeled_loader2 = None
+    dev_loader = None
+    special_set = []
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set

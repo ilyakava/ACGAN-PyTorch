@@ -22,7 +22,7 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import data
-from utils import weights_init, compute_acc, decimate
+from utils import weights_init, compute_acc, decimate, RunningAcc
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
 from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48
@@ -136,7 +136,7 @@ ndf = int(opt.ndf)
 num_classes = int(opt.num_classes)
 nc = 3
 if not opt.dev_batch_size:
-    opt.dev_batch_size = 2*opt.train_batch_size
+    opt.dev_batch_size = opt.train_batch_size
 if not opt.train_batch_size_2:
     opt.train_batch_size_2 = opt.train_batch_size
 
@@ -145,6 +145,8 @@ if opt.dataset == 'cifar':
     metaloader = data.get_cifar_loaders
 elif opt.dataset == 'stl':
     metaloader = data.get_stl_loaders
+elif opt.dataset == 'celeba':
+    metaloader = data.get_celeba_loaders
 else:
     raise NotImplementedError("No such dataset {}".format(opt.dataset))
 labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = metaloader(opt)
@@ -202,6 +204,7 @@ print(netD)
 # loss functions
 def dis_criterion(inputs, labels):
     # hinge loss
+    # from Yogesh, probably from: https://github.com/wronnyhuang/gan_loss/blob/master/trainer.py
     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
 # dis_criterion = nn.BCELoss()
 aux_criterion = nn.NLLLoss()
@@ -255,6 +258,7 @@ score_history_times = []
 latest_save = None
 this_run_iters = 0
 this_run_seconds = 0
+running_accuracy = RunningAcc(100)
 
 
 while curr_iter <= opt.max_itr:
@@ -282,8 +286,9 @@ while curr_iter <= opt.max_itr:
         errD_real.backward()
         D_x = dis_output.data.mean()
 
-        # compute the current classification accuracy
-        accuracy = compute_acc(aux_output, aux_label)
+        # compute the current classification accuracy on train
+        if dis_step == 0:
+            accuracy = compute_acc(aux_output, aux_label)
 
         # train with fake
         noise.data.resize_(batch_size, nz).normal_(0, 1)
@@ -346,22 +351,38 @@ while curr_iter <= opt.max_itr:
     D_G_z2 = dis_output.data.mean()
     optimizerG.step()
 
+    ############################
+    # A little running eval accuracy
+    ###########################
+    if dev_loader:
+        real_cpu, label = dev_loader.next()
+        if opt.cuda:
+            real_cpu = real_cpu.cuda()
+        input.data.resize_as_(real_cpu).copy_(real_cpu)
+        dis_label.data.resize_(batch_size).fill_(real_label)
+        aux_label.data.resize_(batch_size).copy_(label)
+        dis_output, aux_output = netD(input.detach())
+
+        test_accuracy, test_acc_dev = running_accuracy.compute_acc(aux_output, aux_label)
+    else:
+        test_accuracy, test_acc_dev = -1, -1
+
     # compute the average loss
-    all_loss_G = avg_loss_G * curr_iter
-    all_loss_D = avg_loss_D * curr_iter
-    all_loss_A = avg_loss_A * curr_iter
+    all_loss_G = avg_loss_G * this_run_iters
+    all_loss_D = avg_loss_D * this_run_iters
+    all_loss_A = avg_loss_A * this_run_iters
     all_loss_G += errG.item()
     all_loss_D += errD.item()
     all_loss_A += accuracy
-    avg_loss_G = all_loss_G / (curr_iter + 1)
-    avg_loss_D = all_loss_D / (curr_iter + 1)
-    avg_loss_A = all_loss_A / (curr_iter + 1)
+    avg_loss_G = all_loss_G / (this_run_iters + 1)
+    avg_loss_D = all_loss_D / (this_run_iters + 1)
+    avg_loss_A = all_loss_A / (this_run_iters + 1)
 
     this_run_seconds += (time.time() - this_iter_start)
 
-    print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Acc: %.4f (%.4f)'
+    print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Train Acc: %.4f (%.4f) Test Acc: %.4f +/- %.2f'
           % (curr_iter, this_run_iters / this_run_seconds,
-             errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A))
+             errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A, test_accuracy, test_acc_dev))
     
     ### Save GAN Images to interface with IS and FID scores
     if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
