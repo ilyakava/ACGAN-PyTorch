@@ -167,6 +167,38 @@ class Discriminator(nn.Module):
 
         return disc_logits.view(-1, 1).squeeze(1), self.softmax(aux_logits).squeeze()
 
+class Classifier(nn.Module):
+    def __init__(self, opt):
+        super(Classifier, self).__init__()
+
+        self.opt = opt
+        ndf = 128
+        self.ngpu = int(opt.ngpu)
+        self.feat_net = nn.Sequential(
+            FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            nn.ReLU(),
+        )
+
+        self.aux_net = nn.Sequential(
+            SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
+        )
+        self.aux_net.apply(utils.weights_init_spectral)
+        self.softmax = nn.Softmax()
+
+    def forward(self, input):
+        if self.ngpu > 1:
+            feat = nn.parallel.data_parallel(self.feat_net, input, range(self.ngpu))
+            aux_logits = nn.parallel.data_parallel(self.aux_net, feat, range(self.ngpu))
+        else:
+            feat = self.feat_net(input)
+            aux_logits = self.aux_net(feat)
+
+        output = self.softmax(aux_logits).squeeze()
+        return output[:,K].squeeze(1), output[:,:K]
+
 
 class Encoder(nn.Module):
     def __init__(self, opt):

@@ -185,7 +185,10 @@ print(netG)
 
 # Define the discriminator and initialize the weights
 if opt.imageSize == 32:
-    netD = resnet.Discriminator(opt)
+    if opt.marygan:
+        netD = resnet.Classifier(opt)
+    else:
+        netD = resnet.Discriminator(opt)
 elif opt.imageSize == 64:
     netD = resnet_extra.Discriminator(opt)
 elif opt.imageSize == 48:
@@ -202,12 +205,20 @@ if opt.netD != '':
 print(netD)
 
 # loss functions
+nll = nn.NLLLoss()
 def dis_criterion(inputs, labels):
     # hinge loss
     # from Yogesh, probably from: https://github.com/wronnyhuang/gan_loss/blob/master/trainer.py
     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
 # dis_criterion = nn.BCELoss()
-aux_criterion = nn.NLLLoss()
+acgan_aux_criterion = nll
+def marygan_criterion(inputs, labels):
+    return nll(torch.log(inputs),labels)
+if opt.marygan:
+    aux_criterion = marygan_criterion
+else:
+    aux_criterion = acgan_aux_criterion
+
 
 # tensor placeholders
 input = torch.FloatTensor(opt.train_batch_size, 3, opt.imageSize, opt.imageSize)
@@ -217,6 +228,7 @@ dis_label = torch.FloatTensor(opt.train_batch_size)
 aux_label = torch.LongTensor(opt.train_batch_size)
 real_label = 1
 fake_label = 0
+K = opt.num_classes - 1
 
 # if using cuda
 if opt.cuda:
@@ -280,9 +292,12 @@ while curr_iter <= opt.max_itr:
         aux_label.data.resize_(batch_size).copy_(label)
         dis_output, aux_output = netD(input)
 
-        dis_errD_real = dis_criterion(dis_output, dis_label)
         aux_errD_real = aux_criterion(aux_output, aux_label)
-        errD_real = dis_errD_real + opt.aux_scale_D * aux_errD_real
+        errD_real = opt.aux_scale_D * aux_errD_real
+        if not opt.marygan:
+            dis_errD_real = dis_criterion(dis_output, dis_label)
+            errD_real += dis_errD_real
+
         errD_real.backward()
         D_x = dis_output.data.mean()
 
@@ -298,37 +313,36 @@ while curr_iter <= opt.max_itr:
             class_onehot = np.zeros((batch_size, num_classes))
             class_onehot[np.arange(batch_size), label] = 1
             noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+            aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+        else:
+            aux_label.data.resize_(batch_size).fill_(K)
         noise_ = (torch.from_numpy(noise_))
         noise.data.copy_(noise_.view(batch_size, nz))
-        aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
 
         fake = netG(noise)
         dis_label.data.fill_(fake_label)
         dis_output, aux_output = netD(fake.detach())
-        dis_errD_fake = dis_criterion(dis_output, dis_label)
-        if opt.aux_scale_D > 0:
-            if opt.marygan:
-                errD_fake = dis_errD_fake
-            else:
-                aux_errD_fake = aux_criterion(aux_output, aux_label)
-                errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
+        if opt.marygan:
+            errD_fake = aux_criterion(aux_output, aux_label)
         else:
-            errD_fake = dis_errD_fake
+            dis_errD_fake = dis_criterion(dis_output, dis_label)
+            aux_errD_fake = aux_criterion(aux_output, aux_label)
+            errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
         errD_fake.backward()
         D_G_z1 = dis_output.data.mean()
         errD = errD_real + errD_fake
         
-        if unlabeled_loader:
-            # train with unlabeled
-            unl_images, _ = unlabeled_loader.next()
-            if opt.cuda:
-                unl_images = unl_images.cuda()
-            input.data.copy_(unl_images)
-            dis_label.data.fill_(real_label)
-            dis_output, aux_output = netD(input)
-            dis_errD_unl = dis_criterion(dis_output, dis_label)
-            dis_errD_unl.backward()
-            errD += dis_errD_unl
+        # if unlabeled_loader:
+        #     # train with unlabeled
+        #     unl_images, _ = unlabeled_loader.next()
+        #     if opt.cuda:
+        #         unl_images = unl_images.cuda()
+        #     input.data.copy_(unl_images)
+        #     dis_label.data.fill_(real_label)
+        #     dis_output, aux_output = netD(input)
+        #     dis_errD_unl = dis_criterion(dis_output, dis_label)
+        #     dis_errD_unl.backward()
+        #     errD += dis_errD_unl
 
         optimizerD.step()
 
@@ -338,15 +352,13 @@ while curr_iter <= opt.max_itr:
     netG.zero_grad()
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
     dis_output, aux_output = netD(fake)
-    dis_errG = dis_criterion(dis_output, dis_label)
-    if opt.aux_scale_G > 0:
-        if opt.marygan:
-            aux_errG = -torch.mean(aux_output.max(1)[0])
-        else:
-            aux_errG = aux_criterion(aux_output, aux_label)
-        errG = dis_errG + opt.aux_scale_G * aux_errG
+    if opt.marygan:
+        Vtrue_loss = torch.log(output[:,:K])
+        errG = -torch.mean(Vtrue_loss.max(1)[0])
     else:
-        errG = dis_errG
+        dis_errG = dis_criterion(dis_output, dis_label)
+        aux_errG = aux_criterion(aux_output, aux_label)
+        errG = dis_errG + opt.aux_scale_G * aux_errG
     errG.backward()
     D_G_z2 = dis_output.data.mean()
     optimizerG.step()
