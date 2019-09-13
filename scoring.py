@@ -14,7 +14,7 @@ import fid
 import inception as iscore
 import imageio
 import tensorflow as tf
-from torchvision.datasets import CIFAR10, STL10
+from torchvision.datasets import CIFAR10, STL10, ImageFolder
 import torch
 import visdom
 from torchvision import transforms
@@ -104,6 +104,43 @@ def calc_stl():
     mfid, sfid = fid_ms_for_imgs(images)
     
     np.savez(optinst.outdata_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+
+def calc_celeba():
+    print('Calculating celeba FID')
+    N = 50000
+    optinst = optclass()
+    optdict = {
+        'data_root': '/scratch0/ilya/locDoc/data/celeba_5class',
+        'dataset': 'stl',
+        'imageSize': 64,
+        'dev_batch_size': 100,
+        'size_labeled_data': 4000,
+        'train_batch_size': 100,
+        'train_batch_size_2': 100,
+        'outdata_fname': '/scratch0/ilya/locDoc/data/celeba_5class/fid_is_scores.npz',
+    }
+    for k, v in optdict.items():
+        setattr(optinst, k, v)
+
+    tform = transforms.Compose([
+        transforms.Resize((optinst.imageSize,optinst.imageSize)),
+        transforms.Lambda(lambda img: np.array(img))])
+    
+    training_set = ImageFolder(root=optinst.data_root, transform=tform)
+    trainloader = torch.utils.data.DataLoader(training_set, batch_size=optinst.train_batch_size_2, shuffle=True, num_workers=2)
+    assert(len(trainloader) * optinst.train_batch_size_2 >= N)
+    images = np.empty((N,optinst.imageSize,optinst.imageSize,3))
+    for i, xy in enumerate(trainloader, 0):
+        x, _ = xy
+        start = i * optinst.train_batch_size_2
+        end = start + optinst.train_batch_size_2
+        images[start:end] = np.array(x)
+        if end >= N:
+            break
+    
+    mfid, sfid = fid_ms_for_imgs(images)
+    
+    np.savez(optinst.outdata_fname, mfid=mfid, sfid=sfid)
     
     
 def fid_ms_for_imgs(images, mem_fraction=1):
@@ -180,6 +217,7 @@ def batch_scores(opt):
     num_classes = 10
     print('running batch scores')
     data_stats = np.load(opt.dataset_is_fid)
+    scores_todo = opt.scores_todo.split(',')
     
     # make/load history files in each
     def load_or_make_hist(d):
@@ -238,8 +276,8 @@ def batch_scores(opt):
                 print('SKIPPING %s, values already computed' % mfG)
                 next
             elif os.path.isfile(mfG):
+                # tf.reset_default_graph()
                 # find and load the model
-                
                 if opt.imageSize == 32:
                     netG = resnet.Generator(opt)
                 elif opt.imageSize == 64:
@@ -261,7 +299,7 @@ def batch_scores(opt):
                 n_used_imgs = 50000
                 x = np.empty((n_used_imgs,opt.imageSize,opt.imageSize,3), dtype=np.uint8)
                 # create a bunch of GAN images
-                for l in  tqdm(range(n_used_imgs // opt.train_batch_size),desc='Generating'):
+                for l in  tqdm(range(n_used_imgs // opt.train_batch_size),desc='Generating [%s][%06d]' % (legend[i], c)):
                     start = l * opt.train_batch_size
                     end = start + opt.train_batch_size
 
@@ -269,10 +307,10 @@ def batch_scores(opt):
                     label = np.random.randint(0, num_classes, batch_size)
                     noise_ = np.random.normal(0, 1, (batch_size, nz))
                     
-                    if not re.findall('marygan', legend[i]):
-                        class_onehot = np.zeros((batch_size, num_classes))
-                        class_onehot[np.arange(batch_size), label] = 1
-                        noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+                    # if not re.findall('marygan', legend[i]):
+                    #     class_onehot = np.zeros((batch_size, num_classes))
+                    #     class_onehot[np.arange(batch_size), label] = 1
+                    #     noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
                     noise_ = (torch.from_numpy(noise_))
                     noise.data.copy_(noise_.view(batch_size, nz))
                     fake = netG(noise).detach().data.cpu().numpy()
@@ -280,19 +318,23 @@ def batch_scores(opt):
                     fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
                     x[start:end] = np.moveaxis(fake,1,-1)
                 
+                torch.cuda.empty_cache() # without this get the error: Failed to get convolution algorithm
                 # scoring starts
-                if (not ('IS' in hists[i][c])) or opt.overwrite: 
-                    mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
-                    print('[%s][%06d] IS mu: %f. IS sigma: %f.' % (legend[i], c, mis, sis))
-                    hists[i][c]['IS'] = [mis, sis]
-                    np.save(os.path.join(d, HIST_FNAME), hists[i])
+                if 'IS' in scores_todo:
+                    if (not ('IS' in hists[i][c])) or opt.overwrite: 
+                        mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
+                        print('[%s][%06d] IS mu: %f. IS sigma: %f.' % (legend[i], c, mis, sis))
+                        hists[i][c]['IS'] = [mis, sis]
+                        np.save(os.path.join(d, HIST_FNAME), hists[i])
 
-                if (not ('FID' in hists[i][c])) or opt.overwrite: 
-                    m1, s1 = fid_ms_for_imgs(x, mem_fraction=opt.tfmem)
-                    fid_value = fid.calculate_frechet_distance(m1, s1, data_stats['mfid'], data_stats['sfid'])
-                    print('[%s][%06d] FID: %f' % (legend[i], c, fid_value))
-                    hists[i][c]['FID'] = fid_value
-                    np.save(os.path.join(d, HIST_FNAME), hists[i])
+                if 'FID' in scores_todo:
+                    if (not ('FID' in hists[i][c])) or opt.overwrite: 
+                        m1, s1 = fid_ms_for_imgs(x, mem_fraction=opt.tfmem)
+                        fid_value = fid.calculate_frechet_distance(m1, s1, data_stats['mfid'], data_stats['sfid'])
+                        print('[%s][%06d] FID: %f' % (legend[i], c, fid_value))
+                        hists[i][c]['FID'] = fid_value
+                        np.save(os.path.join(d, HIST_FNAME), hists[i])
+                del x
             else:
                 print('SKIPPING %s, no file found' % mfG)
                 next
@@ -319,11 +361,12 @@ if __name__ == '__main__':
     parser.add_argument('--run_scoring_now', type=bool, default=False)
     parser.add_argument('--tfmem', default=0.5, type=float, help="What fraction of GPU memory tf should use.")
     parser.add_argument('--dataset_is_fid', default='/scratch0/ilya/locDoc/data/cifar10/fid_is_scores.npz', help='cifar raw data IS FID stats')
-    parser.add_argument('--mode', default='listen', help='listen | batch')
+    parser.add_argument('--mode', default='batch', help='listen | batch')
     parser.add_argument('--dirs', help='For batch mode, use space to separate list')
     parser.add_argument('--checkpoints', help='For batch mode, use space to separate list')
     parser.add_argument('--overwrite', type=bool, default=False, help="Include this argument to overwrite batch perf, otherwise omit it")
     parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
+    parser.add_argument('--scores_todo', default='IS,FID', help="")
     
     # for batch mode from main.py
     parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
@@ -351,6 +394,8 @@ if __name__ == '__main__':
         batch_scores(opt)
     elif opt.mode == 'calc_stl':
         calc_stl()
+    elif opt.mode == 'calc_celeba':
+        calc_celeba()
     else:
         raise NotImplementedError("No such dataset {}".format(opt.dataset))
 
