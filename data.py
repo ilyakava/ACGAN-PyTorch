@@ -1,11 +1,75 @@
 
+import os
+import sys
+import pickle
+
 import numpy as np
 import torch
-from torchvision.datasets import MNIST, SVHN, CIFAR10, STL10, ImageFolder
+from torchvision.datasets import MNIST, SVHN, CIFAR10, STL10, ImageFolder, CIFAR100
 from torchvision import transforms
 import torchvision.utils as vutils
 
 import pdb
+
+class CIFAR20(CIFAR100):
+    """`CIFAR100 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
+
+    This is a subclass of the `CIFAR10` Dataset.
+    """
+    def __init__(self, root, train=True,
+                 transform=None, target_transform=None,
+                 download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train  # training set or test set
+
+        if download:
+            self.download()
+
+        if not self._check_integrity():
+            raise RuntimeError('Dataset not found or corrupted.' +
+                               ' You can use download=True to download it')
+
+        # now load the picked numpy arrays
+        if self.train:
+            self.train_data = []
+            self.train_labels = []
+            for fentry in self.train_list:
+                f = fentry[0]
+                file = os.path.join(self.root, self.base_folder, f)
+                fo = open(file, 'rb')
+                if sys.version_info[0] == 2:
+                    entry = pickle.load(fo)
+                else:
+                    entry = pickle.load(fo, encoding='latin1')
+                self.train_data.append(entry['data'])
+                if 'labels' in entry:
+                    self.train_labels += entry['labels']
+                else:
+                    self.train_labels += entry['coarse_labels']
+                fo.close()
+
+            self.train_data = np.concatenate(self.train_data)
+            self.train_data = self.train_data.reshape((50000, 3, 32, 32))
+            self.train_data = self.train_data.transpose((0, 2, 3, 1))  # convert to HWC
+        else:
+            f = self.test_list[0][0]
+            file = os.path.join(self.root, self.base_folder, f)
+            fo = open(file, 'rb')
+            if sys.version_info[0] == 2:
+                entry = pickle.load(fo)
+            else:
+                entry = pickle.load(fo, encoding='latin1')
+            self.test_data = entry['data']
+            if 'labels' in entry:
+                self.test_labels = entry['labels']
+            else:
+                self.test_labels = entry['coarse_labels']
+            fo.close()
+            self.test_data = self.test_data.reshape((10000, 3, 32, 32))
+            self.test_data = self.test_data.transpose((0, 2, 3, 1))  # convert to HWC
+
 
 class DataLoader(object):
 
@@ -154,6 +218,69 @@ def get_cifar_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
+def get_cifar100_loaders(config):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    training_set = CIFAR100(config.data_root, train=True, download=True, transform=transform)
+    dev_set = CIFAR100(config.data_root, train=False, download=True, transform=transform)
+
+    indices = np.arange(len(training_set))
+    np.random.shuffle(indices)
+    mask = np.zeros(indices.shape[0], dtype=np.bool)
+    labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+    nclass = 100
+    for i in range(nclass):
+        mask[np.where(labels == i)[0][: int(config.size_labeled_data / nclass)]] = True
+    labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
+    # labeled_indices, unlabeled_indices = indices[mask], indices
+    print ('labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], 'dev size', len(dev_set))
+    unlabeled_loader = None
+    unlabeled_loader2 = None
+
+    labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
+    if unlabeled_indices.shape[0]:
+        unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+        unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+
+    special_set = []
+    for i in range(10):
+        special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+def get_cifar20_loaders(config):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    training_set = CIFAR20(config.data_root, train=True, download=True, transform=transform)
+    dev_set = CIFAR20(config.data_root, train=False, download=True, transform=transform)
+
+    indices = np.arange(len(training_set))
+    np.random.shuffle(indices)
+    mask = np.zeros(indices.shape[0], dtype=np.bool)
+    labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+    nclass = 20
+    for i in range(nclass):
+        mask[np.where(labels == i)[0][: int(config.size_labeled_data / nclass)]] = True
+    labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
+    # labeled_indices, unlabeled_indices = indices[mask], indices
+    print ('labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], 'dev size', len(dev_set))
+    unlabeled_loader = None
+    unlabeled_loader2 = None
+
+    labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
+    if unlabeled_indices.shape[0]:
+        unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+        unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+
+    special_set = []
+    for i in range(10):
+        special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+
 class MyLiteDataLoader(object):
 
     def __init__(self, raw_loader, batch_size):
@@ -200,7 +327,47 @@ def get_stl_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
+def get_imagenet_loaders(config):
+    transform = transforms.Compose([transforms.Resize(config.imageSize), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    training_set = ImageNet(config.data_root, split='train', download=True, transform=transform)
+    dev_set = ImageNet(config.data_root, split='test', download=True, transform=transform)
+
+    print ('labeled size', len(training_set), 'unlabeled size', 0, 'dev size', len(dev_set))
+
+    # indices = np.arange(len(training_set))
+    labeled_loader = MyLiteDataLoader(training_set, config.train_batch_size)
+    unlabeled_loader = None # MyLiteDataLoader(unl_set, config.train_batch_size_2)
+    unlabeled_loader2 = None # DataLoader(config, unl_set, np.arange(len(unl_set)), config.train_batch_size_2)
+    dev_loader = MyLiteDataLoader(dev_set, config.dev_batch_size)
+
+    # labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+    special_set = []
+    #for i in range(10):
+    #    special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    #special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+
 def get_celeba_loaders(config):
+    transform=transforms.Compose([
+                        transforms.Resize((config.imageSize,config.imageSize)),
+                         #  transforms.CenterCrop(image_size),
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                       ])
+    training_set = ImageFolder(root=config.data_root, transform=transform)
+    print ('labeled size', len(training_set), 'unlabeled size', 0, 'dev size', 0)
+
+    labeled_loader = MyLiteDataLoader(training_set, config.train_batch_size)
+    unlabeled_loader = None
+    unlabeled_loader2 = None
+    dev_loader = None
+    special_set = []
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+def get_flower102_loaders(config):
     transform=transforms.Compose([
                         transforms.Resize((config.imageSize,config.imageSize)),
                          #  transforms.CenterCrop(image_size),
