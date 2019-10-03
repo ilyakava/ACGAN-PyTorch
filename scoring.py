@@ -307,10 +307,10 @@ def batch_scores(opt):
                     label = np.random.randint(0, num_classes, batch_size)
                     noise_ = np.random.normal(0, 1, (batch_size, nz))
                     
-                    # if not re.findall('marygan', legend[i]):
-                    #     class_onehot = np.zeros((batch_size, num_classes))
-                    #     class_onehot[np.arange(batch_size), label] = 1
-                    #     noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+                    if opt.acgan_noise:
+                        class_onehot = np.zeros((batch_size, num_classes))
+                        class_onehot[np.arange(batch_size), label] = 1
+                        noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
                     noise_ = (torch.from_numpy(noise_))
                     noise.data.copy_(noise_.view(batch_size, nz))
                     fake = netG(noise).detach().data.cpu().numpy()
@@ -367,12 +367,13 @@ if __name__ == '__main__':
     parser.add_argument('--overwrite', type=bool, default=False, help="Include this argument to overwrite batch perf, otherwise omit it")
     parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
     parser.add_argument('--scores_todo', default='IS,FID', help="")
+    parser.add_argument('--acgan_noise', type=bool, default=False, help="Include this argument to generate noise as input to the generator with class 1 hots.")
     
     # for batch mode from main.py
     parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
     parser.add_argument('--nz', type=int, default=128, help='size of the latent z vector')
-    parser.add_argument('--ngf', type=int, default=64)
-    parser.add_argument('--ndf', type=int, default=64)
+    parser.add_argument('--ngf', type=int, default=128)
+    parser.add_argument('--ndf', type=int, default=128)
     parser.add_argument('--imageSize', type=int, default=32, help='the height / width of the input image to network')
 
     
