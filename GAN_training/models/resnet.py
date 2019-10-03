@@ -106,7 +106,7 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         self.z_dim = opt.GAN_nz
         self.ngpu = opt.ngpu
-        ngf = self.ngf = 128
+        ngf = self.ngf = opt.ngf
         self.dense = nn.Linear(self.z_dim, 4 * 4 * ngf)
         self.final = nn.Conv2d(ngf, opt.nc, 3, stride=1, padding=1)
         nn.init.xavier_uniform(self.dense.weight.data, 1.)
@@ -197,7 +197,41 @@ class Classifier(nn.Module):
             aux_logits = self.aux_net(feat)
 
         output = self.softmax(aux_logits).squeeze()
-        return output[:,K].squeeze(1), output[:,:K]
+        return output[:,self.opt.num_classes-1], output[:,:(self.opt.num_classes-1)]
+
+class ClassifierMultiHinge(nn.Module):
+    """
+    No softmax. Aux net is all classes including fake.
+    """
+    def __init__(self, opt):
+        super(ClassifierMultiHinge, self).__init__()
+
+        self.opt = opt
+        ndf = 128
+        self.ngpu = int(opt.ngpu)
+        self.feat_net = nn.Sequential(
+            FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            nn.ReLU(),
+        )
+
+        self.aux_net = nn.Sequential(
+            SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
+        )
+        self.aux_net.apply(utils.weights_init_spectral)
+
+    def forward(self, input):
+        if self.ngpu > 1:
+            feat = nn.parallel.data_parallel(self.feat_net, input, range(self.ngpu))
+            aux_logits = nn.parallel.data_parallel(self.aux_net, feat, range(self.ngpu))
+        else:
+            feat = self.feat_net(input)
+            aux_logits = self.aux_net(feat)
+
+        output = aux_logits.squeeze()
+        return output[:,self.opt.num_classes-1], output
 
 
 class Encoder(nn.Module):

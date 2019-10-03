@@ -142,6 +142,9 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
+    """
+    Miyato 2018
+    """
     def __init__(self, opt):
         super(Discriminator, self).__init__()
 
@@ -178,6 +181,38 @@ class Discriminator(nn.Module):
             aux_logits = self.aux_net(feat)
 
         return disc_logits.view(-1, 1).squeeze(1), self.softmax(aux_logits).squeeze()
+
+class ClassifierMultiHinge(nn.Module):
+    def __init__(self, opt):
+        super(ClassifierMultiHinge, self).__init__()
+
+        self.opt = opt
+        ndf = 64
+        self.ngpu = int(opt.ngpu)
+        self.feat_net = nn.Sequential(
+            FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf * 2, stride=2),
+            ResBlockDiscriminator(ndf * 2, ndf * 4, stride=2),
+            ResBlockDiscriminator(ndf * 4, ndf * 8, stride=2),
+            ResBlockDiscriminator(ndf * 8, ndf * 16, stride=1),
+            nn.ReLU(),
+        )
+
+        self.aux_net = nn.Sequential(
+            SpectralNorm(nn.Conv2d(ndf * 16, opt.num_classes, 3, 1, 0, bias=False))
+        )
+        self.aux_net.apply(utils.weights_init_spectral)
+
+    def forward(self, input):
+        if self.ngpu > 1:
+            feat = nn.parallel.data_parallel(self.feat_net, input, range(self.ngpu))
+            aux_logits = nn.parallel.data_parallel(self.aux_net, feat, range(self.ngpu))
+        else:
+            feat = self.feat_net(input)
+            aux_logits = self.aux_net(feat)
+
+        output = aux_logits.squeeze()
+        return output[:,self.opt.num_classes-1], output
 
 
 class Encoder(nn.Module):
