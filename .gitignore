@@ -4,3 +4,4 @@ outputs*
 links.txt
 **/.ipynb_checkpoints/*
 figs/*
+*.txt
