@@ -25,7 +25,7 @@ import data
 from utils import weights_init, compute_acc, decimate, RunningAcc
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
-from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48
+from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48, resnet_128
 
 import visdom
 import imageio
@@ -62,6 +62,8 @@ parser.add_argument('--eval_period', type=int, default=1000)
 parser.add_argument('--gantype', default='main', type=str, help="modegan | acgan | mhgan")
 parser.add_argument('--scoring_period', type=int, default=10000)
 parser.add_argument('--run_scoring_now', type=bool, default=False)
+parser.add_argument('--projection_discriminator', type=bool, default=False, help="Set to true to use Miyator Koyama ICLR 2018 projection discriminator")
+parser.add_argument('--noise_class_concat', type=bool, default=False, help="Set to true to have class labels writen to the noise")
 
 # for data loader
 parser.add_argument('--size_labeled_data',  type=int, default=4000)
@@ -99,7 +101,9 @@ elif opt.imageSize == 64:
     empty_img = np.moveaxis(imageio.imread('404_64.png')[:,:,:3],-1,0) / 255.0
 elif opt.imageSize == 48:
     empty_img = np.moveaxis(imageio.imread('404_48.png')[:,:,:3],-1,0) / 255.0
-    
+elif opt.imageSize == 128:
+    empty_img = np.moveaxis(imageio.imread('404_128.png')[:,:,:3],-1,0) / 255.0
+
 def winid():
     """
     Pops first item on visdom_visuals_ids or returns none if it is empty
@@ -134,6 +138,9 @@ nz = int(opt.nz)
 ngf = int(opt.ngf)
 ndf = int(opt.ndf)
 num_classes = int(opt.num_classes)
+num_real_classes = opt.num_classes
+if (opt.gantype == 'marygan') or (opt.gantype == 'mhgan'):
+    num_real_classes = opt.num_classes - 1
 nc = 3
 if not opt.dev_batch_size:
     opt.dev_batch_size = opt.train_batch_size
@@ -172,10 +179,17 @@ if opt.netD == '' and netDfiles:
 if opt.imageSize == 32:
     netG = resnet.Generator(opt)
 elif opt.imageSize == 64:
-    netG = resnet_extra.Generator(opt)
+    if opt.gantype == 'mhgan' and opt.projection_discriminator:
+        netG = resnet_128.Generator64(num_classes=num_real_classes)
+    elif opt.gantype == 'mhgan':
+        netG = resnet_128.Generator64(num_classes=0)
+    else:
+        NotImplementedError()
 elif opt.imageSize == 48:
+    netG = resnet_48.Generator(opt)
+elif opt.imageSize == 128:
     if opt.gantype == 'mhgan':
-        netG = resnet_48.Generator(opt)
+        netG = resnet_128.Generator(num_classes=num_real_classes)
     else:
         NotImplementedError()
 else:
@@ -198,10 +212,20 @@ if opt.imageSize == 32:
     elif opt.gantype == 'mhgan':
         netD = resnet.ClassifierMultiHinge(opt)
 elif opt.imageSize == 64:
-    netD = resnet_extra.Discriminator(opt)
+    if opt.gantype == 'mhgan' and opt.projection_discriminator:
+        netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
+    elif opt.gantype == 'mhgan':
+        netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
+    else:
+        NotImplementedError()
 elif opt.imageSize == 48:
     if opt.gantype == 'mhgan':
         netD = resnet_48.ClassifierMultiHinge(opt)
+    else:
+        NotImplementedError()
+elif opt.imageSize == 128:
+    if opt.gantype == 'mhgan':
+        netD = resnet_128.ClassifierMultiHinge(num_classes=opt.num_classes)
     else:
         NotImplementedError()
 else:
@@ -258,7 +282,9 @@ input = torch.FloatTensor(opt.train_batch_size, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.train_batch_size, nz)
 eval_noise = torch.FloatTensor(opt.train_batch_size, nz).normal_(0, 1)
 dis_label = torch.FloatTensor(opt.train_batch_size)
-aux_label = torch.LongTensor(opt.train_batch_size)
+aux_label = torch.LongTensor(opt.train_batch_size) # use in criterion
+conditioning_label = torch.LongTensor(opt.train_batch_size) # use as network input
+eval_conditioning_label = torch.LongTensor(opt.train_batch_size)
 real_label = 1
 fake_label = 0
 K = opt.num_classes
@@ -273,6 +299,8 @@ if opt.cuda:
     # aux_criterion.cuda()
     input, dis_label, aux_label = input.cuda(), dis_label.cuda(), aux_label.cuda()
     noise, eval_noise = noise.cuda(), eval_noise.cuda()
+    conditioning_label = conditioning_label.cuda()
+    eval_conditioning_label = eval_conditioning_label.cuda()
 
 # define variables
 input = Variable(input)
@@ -280,14 +308,17 @@ noise = Variable(noise)
 eval_noise = Variable(eval_noise)
 dis_label = Variable(dis_label)
 aux_label = Variable(aux_label)
+conditioning_label = Variable(conditioning_label)
+eval_conditioning_label = Variable(eval_conditioning_label)
 # noise for evaluation
 eval_noise_ = np.random.normal(0, 1, (opt.train_batch_size, nz))
-eval_label = np.random.randint(0, num_classes, opt.train_batch_size)
+eval_label_ = np.random.randint(0, num_classes, opt.train_batch_size)
 eval_onehot = np.zeros((opt.train_batch_size, num_classes))
-eval_onehot[np.arange(opt.train_batch_size), eval_label] = 1
+eval_onehot[np.arange(opt.train_batch_size), eval_label_] = 1
 eval_noise_[np.arange(opt.train_batch_size), :num_classes] = eval_onehot[np.arange(opt.train_batch_size)]
 eval_noise_ = (torch.from_numpy(eval_noise_))
 eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz))
+eval_conditioning_label.data.copy_(torch.from_numpy(eval_label_))
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.GAN_lrD, betas=(opt.beta1, opt.beta2))
@@ -325,7 +356,12 @@ while curr_iter <= opt.max_itr:
         input.data.resize_as_(real_cpu).copy_(real_cpu)
         dis_label.data.resize_(batch_size).fill_(real_label)
         aux_label.data.resize_(batch_size).copy_(label)
-        dis_output, aux_output = netD(input)
+        conditioning_label.data.resize_(batch_size).copy_(label)
+        
+        if opt.projection_discriminator:
+            dis_output, aux_output = netD(input, conditioning_label)
+        else:
+            dis_output, aux_output = netD(input)
 
         if (opt.gantype == 'marygan'):
             aux_errD_real = aux_criterion(aux_output, aux_label)
@@ -348,23 +384,30 @@ while curr_iter <= opt.max_itr:
                 accuracy = compute_acc(aux_output, aux_label)
 
         # train with fake
-        noise.data.resize_(batch_size, nz).normal_(0, 1)
         label = np.random.randint(0, num_classes, batch_size)
+        aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+        conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+        noise.data.resize_(batch_size, nz).normal_(0, 1)
         noise_ = np.random.normal(0, 1, (batch_size, nz))
-        if not (opt.gantype == 'marygan'):
+        if opt.noise_class_concat:
             class_onehot = np.zeros((batch_size, num_classes))
             class_onehot[np.arange(batch_size), label] = 1
-            noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
-            aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+            noise_[np.arange(batch_size), :num_classes] = class_onehot
         if opt.gantype == 'mhgan':
+            # overwrite aux_label to signify fake
             label_for_fake = (opt.num_classes - 1) * np.ones(batch_size)
             aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label_for_fake))
         noise_ = (torch.from_numpy(noise_))
         noise.data.copy_(noise_.view(batch_size, nz))
-
-        fake = netG(noise)
         dis_label.data.fill_(fake_label)
-        dis_output, aux_output = netD(fake.detach())
+
+        if opt.projection_discriminator:
+            fake = netG(noise, conditioning_label)
+            dis_output, aux_output = netD(fake.detach(), conditioning_label)
+        else:
+            fake = netG(noise)
+            dis_output, aux_output = netD(fake.detach())
+
         if (opt.gantype == 'marygan'):
             errD_fake = -torch.mean(torch.log(dis_output))
         elif opt.gantype == 'acgan':
@@ -378,14 +421,17 @@ while curr_iter <= opt.max_itr:
         D_G_z1 = dis_output.data.mean()
         errD = errD_real + errD_fake
         
+        # train with unlabeled
         if unlabeled_loader and opt.gantype == 'mhgan':
-            # train with unlabeled
             unl_images, _ = unlabeled_loader.next()
             if opt.cuda:
                 unl_images = unl_images.cuda()
             input.data.copy_(unl_images)
             dis_label.data.fill_(real_label)
-            dis_output, aux_output = netD(input)
+            if opt.projection_discriminator:
+                dis_output, aux_output = netD(input, conditioning_label)
+            else:
+                dis_output, aux_output = netD(input)
             
             # dis_errD_unl = dis_criterion(dis_output, dis_label)
 
@@ -401,7 +447,12 @@ while curr_iter <= opt.max_itr:
     ###########################
     netG.zero_grad()
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
-    dis_output, aux_output = netD(fake)
+
+    if opt.projection_discriminator:
+        dis_output, aux_output = netD(fake, conditioning_label)
+    else:
+        dis_output, aux_output = netD(fake)
+
     if (opt.gantype == 'marygan'):
         errG = -torch.mean(torch.log(aux_output).max(1)[0])
     elif opt.gantype == 'acgan':
@@ -471,10 +522,10 @@ while curr_iter <= opt.max_itr:
             noise.data.resize_(batch_size, nz).normal_(0, 1)
             label = np.random.randint(0, num_classes, batch_size)
             noise_ = np.random.normal(0, 1, (batch_size, nz))
-            if not (opt.gantype == 'marygan'):
+            if opt.noise_class_concat:
                 class_onehot = np.zeros((batch_size, num_classes))
                 class_onehot[np.arange(batch_size), label] = 1
-                noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
+                noise_[np.arange(batch_size), :num_classes] = class_onehot
             noise_ = (torch.from_numpy(noise_))
             noise.data.copy_(noise_.view(batch_size, nz))
             fake = netG(noise).data.cpu().numpy()
@@ -532,13 +583,17 @@ while curr_iter <= opt.max_itr:
         new_ids.append(vis.image(real_grid_sorted, win=winid(), opts={'title': 'Sorted Real Images ' }))
 
         # fake images
-        fake = netG(eval_noise)
+        if opt.projection_discriminator:
+            fake = netG(eval_noise, eval_conditioning_label)
+        else:
+            fake = netG(eval_noise)
+
         fake_grid = vutils.make_grid(fake.data, nrow=10, padding=2, normalize=True)
         new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fixed Fakes' }))
 
         # fake images, but sorted
         n_display_per_class = 10
-        n_fakes_to_sort = n_display_per_class * K
+        n_fakes_to_sort = n_display_per_class * num_real_classes
         n_batches_to_generate = (n_fakes_to_sort // batch_size) + 1
         sorted_fakes_shape = (n_batches_to_generate * batch_size, nc, opt.imageSize, opt.imageSize)
         all_fake_imgs = np.zeros(sorted_fakes_shape)
@@ -547,17 +602,22 @@ while curr_iter <= opt.max_itr:
         for i in range(n_batches_to_generate):
             # set noise
             label = np.random.randint(0, num_classes, batch_size)
+            aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
             noise_ = np.random.normal(0, 1, (batch_size, nz))
-            if not (opt.gantype == 'marygan'):
+            conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+            if opt.noise_class_concat:
                 class_onehot = np.zeros((batch_size, num_classes))
                 class_onehot[np.arange(batch_size), label] = 1
-                noise_[np.arange(batch_size), :num_classes] = class_onehot[np.arange(batch_size)]
-                aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+                noise_[np.arange(batch_size), :num_classes] = class_onehot
             noise_ = (torch.from_numpy(noise_))
             noise.data.copy_(noise_.view(batch_size, nz))
-            # generate 
-            fake = netG(eval_noise)
-            dis_output, aux_output = netD(fake)
+            # generate
+            if opt.projection_discriminator:
+                fake = netG(noise, conditioning_label)
+                dis_output, aux_output = netD(fake, conditioning_label)
+            else:
+                fake = netG(noise)
+                dis_output, aux_output = netD(fake)
             if opt.gantype == 'mhgan':
                 preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
             else:
@@ -586,7 +646,7 @@ while curr_iter <= opt.max_itr:
 
         # plot sorted fakes in groups of classes
         n_classes_display_per_group = 10
-        for i in range(K // 10):
+        for i in range(num_real_classes // n_classes_display_per_group):
             group = sorted_imgs[(i*n_display_per_class*n_classes_display_per_group):((i+1)*n_display_per_class*n_classes_display_per_group)]
             fake_grid_sorted = vutils.make_grid(torch.Tensor(group), nrow=10, padding=2, normalize=True)
             new_ids.append(vis.image(fake_grid_sorted, win=winid(), opts={'title': 'Sorted Fakes Class %i-%i' % (i*n_classes_display_per_group,(i+1)*n_classes_display_per_group) }))
