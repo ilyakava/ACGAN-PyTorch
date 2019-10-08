@@ -22,6 +22,7 @@ from torchvision import transforms
 from GAN_training.models import resnet, resnet_extra, resnet_48
 from classification.models.vgg_face_dag import vgg_face_dag
 from classification.models.densenet import DenseNet121, densenet_stl
+from classification.models.vgg_official2 import vgg16
 from tqdm import tqdm
 
 import data
@@ -168,7 +169,7 @@ def face_plots(mode):
     meds = np.zeros(tot_batches)
     means = np.zeros(tot_batches)
     for b in tqdm(range(1,tot_batches), desc='Distances'):
-        D = pairwise_distances(net_out[:(b*opt.train_batch_size)], metric='cosine')
+        D = pairwise_distances(net_out[:(b*opt.train_batch_size)])
         # remove the diagonal and lower triangle
         to_del = np.tril(np.ones((D.shape[0], D.shape[0]), dtype=int))
         D[to_del == 1] = D.max()
@@ -252,17 +253,14 @@ def stl_plots(mode, klass_picked):
 
     # load comp net
     device = torch.device("cuda:0")
-    compnet = densenet_stl()
-    compnet = torch.nn.DataParallel(compnet)
-    checkpoint = torch.load(os.path.join('/fs/vulcan-scratch/ilyak/locDoc/experiments/classifiers/stl/densenet121_64/ckpt.t7'))
-    compnet.load_state_dict(checkpoint['net'])
+    compnet = vgg16(pretrained=True)
     compnet = compnet.to(device)
-    compnet.eval();
+    compnet.eval()
     transform_test = transforms.Compose([
         transforms.ToPILImage(),
-        transforms.Resize(64),
+        transforms.Resize(224),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     minimal_trans = transform_test
 
@@ -333,7 +331,8 @@ def stl_plots(mode, klass_picked):
 
 
     #net_in = np.empty((x.shape[0],3,32,32))
-    net_in = np.empty((x.shape[0],3,64,64))
+    # net_in = np.empty((x.shape[0],3,64,64))
+    net_in = np.empty((x.shape[0],) + (3,224,224))
     for i in tqdm(range(x.shape[0]),desc='Preprocess'):
         net_in[i] = minimal_trans(np.moveaxis(x[i],0,-1))
 
@@ -344,8 +343,9 @@ def stl_plots(mode, klass_picked):
 
     #net_out = np.empty((x.shape[0], 602112))
     #net_out = np.empty((x.shape[0], 12288))
-    net_out = np.empty((x.shape[0], 1024)) # Densenet
+    # net_out = np.empty((x.shape[0], 1024)) # Densenet
     # net_out = np.empty((x.shape[0], 2622)) # vgg-face
+    net_out = np.empty((x.shape[0], 25088)) # vgg official penultimate
     for i, batch in enumerate(tqdm(my_dataloader,desc='Extract Feat')):
         start = i * opt.train_batch_size
         end = start + opt.train_batch_size
@@ -358,7 +358,7 @@ def stl_plots(mode, klass_picked):
     meds = np.zeros(tot_batches)
     means = np.zeros(tot_batches)
     for b in tqdm(range(1,tot_batches), desc='Distances'):
-        D = pairwise_distances(net_out[:(b*opt.train_batch_size)], metric='cosine')
+        D = pairwise_distances(net_out[:(b*opt.train_batch_size)])
         # remove the diagonal and lower triangle
         to_del = np.tril(np.ones((D.shape[0], D.shape[0]), dtype=int))
         D[to_del == 1] = D.max()
@@ -551,7 +551,7 @@ def cifar_plots(mode, klass_picked):
     meds = np.zeros(tot_batches)
     means = np.zeros(tot_batches)
     for b in tqdm(range(1,tot_batches), desc='Distances'):
-        D = pairwise_distances(net_out[:(b*opt.train_batch_size)], metric='cosine')
+        D = pairwise_distances(net_out[:(b*opt.train_batch_size)])
         # remove the diagonal and lower triangle
         to_del = np.tril(np.ones((D.shape[0], D.shape[0]), dtype=int))
         D[to_del == 1] = D.max()
@@ -581,9 +581,9 @@ def run_cifar_trials(mode, klass_picked, ntrials=1):
         hist[0,t,:], hist[1,t,:], hist[2,t,:] = cifar_plots(mode, klass_picked)
 
     if klass_picked is not None:
-        outfn = '%s_class_%i_ntrial_%i.npz' % (mode, klass_picked, ntrials)
+        outfn = '%s_classW_%i_ntrial_%i.npz' % (mode, klass_picked, ntrials)
     else:
-        outfn = '%s_all_cos_ntrial_%i.npz' % (mode, ntrials)
+        outfn = '%s_allT_ntrial_%i.npz' % (mode, ntrials)
     np.savez(xp+'diversity_plots/cifar/'+outfn,
         mins=hist[0], meds=hist[1], means=hist[2])
 
@@ -596,7 +596,7 @@ def run_stl_trials(mode, klass_picked, ntrials=1):
     if klass_picked is not None:
         outfn = '%s_class_%i_ntrial_%i.npz' % (mode, klass_picked, ntrials)
     else:
-        outfn = '%s_all_cos_ntrial_%i.npz' % (mode, ntrials)
+        outfn = '%s_all_vggoff_ntrial_%i.npz' % (mode, ntrials)
     np.savez(xp+'diversity_plots/stl/'+outfn,
         mins=hist[0], meds=hist[1], means=hist[2])
 
@@ -606,29 +606,30 @@ def run_face_trials(mode, ntrials=1):
     for t in range(ntrials):
         hist[0,t,:], hist[1,t,:], hist[2,t,:] = face_plots(mode)
 
-    outfn = '%s_all_cos_ntrial_%i.npz' % (mode, ntrials)
+    outfn = '%s_allT_ntrial_%i.npz' % (mode, ntrials)
     np.savez(xp+'diversity_plots/celeba/'+outfn,
         mins=hist[0], meds=hist[1], means=hist[2])
 
 if __name__ == '__main__':
-    # run_face_trials('marygan', 5)
-    # run_face_trials('acgan', 5)
-    # run_face_trials('vanilla', 5)
+#     run_face_trials('marygan', 10)
+#     run_face_trials('acgan', 10)
+#     run_face_trials('vanilla', 10)
 
-    # k = None
+#     k = None
     # run_stl_trials('marygan', k, 5)
     # run_stl_trials('acgan', k, 5)
     # run_stl_trials('vanilla', k, 5)
 
-    k = None
-    run_cifar_trials('marygan', k, 5)
-    run_cifar_trials('acgan', k, 5)
-    run_cifar_trials('vanilla', k, 5)
+#     k = None
+    # run_cifar_trials('marygan', k, 10)
+    # run_cifar_trials('acgan', k, 10)
+    # run_cifar_trials('vanilla', k, 10)
 
 
-    # for k in range(10):
-    #     # run_cifar_trials('marygan', k, 10)
-    #     # run_cifar_trials('acgan', k, 10)
+    for k in range(0,10):
+#         run_cifar_trials('marygan', k, 5)
+#         run_cifar_trials('acgan', k, 5)
+        run_cifar_trials('vanilla', k, 5)
 
     #     run_stl_trials('marygan', k, 10)
     #     run_stl_trials('acgan', k, 10)
