@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class Bottleneck(nn.Module):
     def __init__(self, in_planes, growth_rate):
         super(Bottleneck, self).__init__()
@@ -34,12 +33,15 @@ class Transition(nn.Module):
 
 
 class DenseNet(nn.Module):
-    def __init__(self, block, nblocks, growth_rate=12, reduction=0.5, num_classes=10):
+    def __init__(self, block, nblocks, growth_rate=12, reduction=0.5, num_classes=10, in_size=32):
         super(DenseNet, self).__init__()
         self.growth_rate = growth_rate
 
         num_planes = 2*growth_rate
-        self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, padding=1, bias=False)
+        if in_size == 32:
+            self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, padding=1, bias=False)
+        elif in_size == 64:
+            self.conv1 = nn.Conv2d(3, num_planes, kernel_size=7, padding=3, stride=2, bias=False)
 
         self.dense1 = self._make_dense_layers(block, num_planes, nblocks[0])
         num_planes += nblocks[0]*growth_rate
@@ -100,9 +102,12 @@ def DenseNet161():
 def densenet_cifar():
     return DenseNet(Bottleneck, [6,12,24,16], growth_rate=12)
 
+def densenet_stl():
+    return DenseNet(Bottleneck, [6,12,24,16], growth_rate=32, in_size=64)
+
 def test():
-    net = densenet_cifar()
-    x = torch.randn(1,3,32,32)
+    net = densenet_stl()
+    x = torch.randn(1,3,64,64)
     y = net(x)
     print(y)
 
