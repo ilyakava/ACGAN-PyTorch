@@ -41,8 +41,8 @@ class VGG(nn.Module):
         if init_weights:
             self._initialize_weights()
 
-    def forward(self, x, feat=False):
-        if feat:
+    def forward(self, x, feat=0):
+        if feat == 2:
             # for vgg16 without BN
             relu1_2 = self.features[3](x)
             relu1_2 = relu1_2.view(relu1_2.size(0),-1)
@@ -54,6 +54,10 @@ class VGG(nn.Module):
             relu4_3 = relu4_3.view(relu4_3.size(0),-1)
             
             return torch.cat((relu1_2, relu2_2, relu3_3, relu4_3),1)
+        elif feat == 1:
+            x = self.features(x)
+            x = self.avgpool(x)
+            return x.view(x.size(0), -1)
         else:
             x = self.features(x)
             x = self.avgpool(x)
