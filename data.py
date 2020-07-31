@@ -172,19 +172,17 @@ def get_mnist_subset_loaders(config):
     dev_set = MNIST(config.data_root, train=False, download=True, transform=transform)
 
     indices = np.arange(len(training_set))
-    # np.random.shuffle(indices)
     mask = np.zeros(indices.shape[0], dtype=np.bool)
     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
-    
     for i in whitelist_labels:
         mask[np.where(labels == i)[0]] = True
+        
     # relabel based on whitelist
     # for new_label, old_label in enumerate(whitelist_labels):
     #     for idx in np.where(labels == old_label)[0]:
     #         pdb.set_trace()
     #         training_set[idx][1] = new_label # does not support assignment
             
-        
         
     labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
     print ('labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0])
@@ -193,14 +191,23 @@ def get_mnist_subset_loaders(config):
     labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
     # unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size)
     # unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size)
-    # dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+    
+    dev_indices = np.arange(len(dev_set))
+    dev_mask = np.zeros(dev_indices.shape[0], dtype=np.bool)
+    dev_labels = np.array([dev_set[i][1] for i in dev_indices], dtype=np.int64)
+    for i in whitelist_labels:
+        dev_mask[np.where(dev_labels == i)[0]] = True
+    dev_indices = dev_indices[dev_mask]
+    
+    dev_loader = DataLoader(config, dev_set, dev_indices, config.dev_batch_size)
+    print ('dev size', dev_indices.shape[0])
 
     special_set = []
     for i in whitelist_labels:
         special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
     special_set = torch.stack(special_set)
 
-    return labeled_loader, None, None, None, special_set
+    return labeled_loader, None, None, dev_loader, special_set
 
 def get_svhn_loaders(config):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])

@@ -2,7 +2,13 @@
 Code modified from PyTorch DCGAN examples: https://github.com/pytorch/examples/tree/master/dcgan
 
 Example Usage:
+# For MNIST zeros and ones
+# Improved GAN / Mary GAN
 CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest6 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001
+# activation maximization gan
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest7 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss activation_maximization
+# complement GAN
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest9 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss crammer_singer_complement --g_loss_aux confuse --g_loss_aux_weight 0.33 --confuse_margin 1.0
 """
 from __future__ import print_function
 import argparse
@@ -89,6 +95,7 @@ parser.add_argument("--d_loss", help="nll | activation_maximization | activation
 parser.add_argument("--g_loss", help="see d_loss", default="positive_log_likelihood")
 parser.add_argument("--g_loss_aux", help="see d_loss", default=None)
 parser.add_argument('--g_loss_aux_weight', default=0.0, type=float)
+parser.add_argument('--confuse_margin', default=1.0, type=float)
 
 
 opt = parser.parse_args()
@@ -292,6 +299,7 @@ print(netD)
 losses_on_logits = ['crammer_singer', 'crammer_singer_complement', 'confuse']
 losses_on_features = ['feature_matching', 'feature_matching_l1']
 nll = nn.NLLLoss() # cross entropy but assumes log was already taken
+K = opt.num_classes
 def myloss(X=None, Ylabel=None, Xfeat=None, Yfeat=None, loss_type='nll'):
     """For trying multiple losses.
     Args:
@@ -331,7 +339,7 @@ def myloss(X=None, Ylabel=None, Xfeat=None, Yfeat=None, loss_type='nll'):
         min_wrong, _ = wrongs.min(1)
         return torch.mean(-torch.log(min_wrong))
     elif loss_type == 'confuse':
-        confuse_margin = 0.1 #  0.01
+        confuse_margin = opt.confuse_margin # 0.1 #  0.01
         
         mask = torch.ones_like(X)
         mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
@@ -341,7 +349,7 @@ def myloss(X=None, Ylabel=None, Xfeat=None, Yfeat=None, loss_type='nll'):
         mask.scatter_(1, max_Ylabel.unsqueeze(-1), 0)
         wrongs2 = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K-1)
         runnerup_wrong, _ = wrongs2.max(1)
-        # make a step towards the margin if it is far from the margin
+        # make a step towards the margin if it is outside of confuse_margin
         return torch.mean(F.relu(-confuse_margin + max_wrong - runnerup_wrong))
     # elif loss_type == 'wasserstein':
     #     inputs = X.gather(1,Ylabel.unsqueeze(-1))
@@ -627,12 +635,14 @@ while curr_iter <= opt.max_itr:
             dis_label.data.resize_(batch_size).fill_(real_label)
             aux_label.data.resize_(batch_size).copy_(label)
             conditioning_label.data.resize_(batch_size).copy_(label)
-            if opt.projection_discriminator:
-                dis_output, aux_output = netD(input.detach(), conditioning_label)
-            else:
-                dis_output, aux_output = netD(input.detach())
-            if opt.gantype == 'mhgan':
-                aux_output = aux_output[:,:(opt.num_classes-1)]
+            # if opt.projection_discriminator:
+            #     dis_output, aux_output = netD(input.detach(), conditioning_label)
+            # else:
+            #     dis_output, aux_output = netD(input.detach())
+            # if opt.gantype == 'mhgan':
+            #     aux_output = aux_output[:,:(opt.num_classes-1)]
+            aux_output = netD(input.detach(), logits=False, features=False)
+            aux_output = aux_output[:,:opt.num_classes]
 
             test_accuracy, test_acc_dev = running_accuracy.compute_acc(aux_output, aux_label)
         else:
