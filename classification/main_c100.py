@@ -1,7 +1,7 @@
 '''Train CIFAR10 with PyTorch.
 
 Usage:
-CUDA_VISIBLE_DEVICES=0 python main_stl.py --outf=/fs/vulcan-scratch/ilyak/locDoc/experiments/classifiers/stl/densenet121 --data_root=/fs/vulcan-scratch/ilyak/locDoc/data/stl10
+python main_c100.py --outf=/fs/vulcan-scratch/ilyak/locDoc/experiments/classifiers/cifar100/densenet121 --data_root=/fs/vulcan-scratch/ilyak/locDoc/data
 '''
 from __future__ import print_function
 
@@ -18,12 +18,12 @@ import os
 import argparse
 
 #from models.vgg import VGG
-from models.densenet import densenet_stl as DenseNet121
+from models.densenet import DenseNet121
 from utils import progress_bar
 
 import pdb
 
-parser = argparse.ArgumentParser(description='PyTorch STL10 Training')
+parser = argparse.ArgumentParser(description='PyTorch CIFAR100 Training')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--data_root', required=True, help='path to dataset')
@@ -37,24 +37,24 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 # Data
 print('==> Preparing data..')
 transform_train = transforms.Compose([
-    transforms.RandomCrop(86, padding=0),
+    transforms.RandomCrop(32, padding=4),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
 ])
 
 transform_test = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
 ])
 
-trainset = torchvision.datasets.STL10(root=args.data_root, split='train', download=True, transform=transform_train)
+trainset = torchvision.datasets.CIFAR100(root=args.data_root, train=True, download=True, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=2)
 
-testset = torchvision.datasets.STL10(root=args.data_root, split='test', download=True, transform=transform_test)
+testset = torchvision.datasets.CIFAR100(root=args.data_root, train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
-classes = ('airplane', 'bird', 'car', 'cat', 'deer', 'dog', 'horse', 'monkey', 'ship', 'truck')
+#classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
 # Model
 print('==> Building model..')
@@ -63,7 +63,7 @@ print('==> Building model..')
 # net = ResNet18()
 # net = PreActResNet18()
 # net = GoogLeNet()
-net = DenseNet121()
+net = DenseNet121(num_classes=100)
 # net = ResNeXt29_2x64d()
 # net = MobileNet()
 # net = MobileNetV2()
@@ -108,24 +108,8 @@ def train(epoch):
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
 
-        progress_bar(batch_idx, len(trainloader), 'T1 Loss: %.3f | Acc: %.3f%% (%d/%d)'
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
             % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-    for batch_idx, (inputs, targets) in enumerate(testloader):
-        if batch_idx < 70:
-            inputs, targets = inputs.to(device), targets.to(device)
-            optimizer.zero_grad()
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-    
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-    
-            progress_bar(batch_idx, 70, 'T2 Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
 def test(epoch):
     global best_acc
@@ -135,18 +119,17 @@ def test(epoch):
     total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
-            if batch_idx >= 70:
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = net(inputs)
-                loss = criterion(outputs, targets)
-    
-                test_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-    
-                progress_bar(batch_idx-70, 10, 'TE Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                    % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = net(inputs)
+            loss = criterion(outputs, targets)
+
+            test_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
     # Save checkpoint.
     acc = 100.*correct/total
@@ -163,6 +146,6 @@ def test(epoch):
         best_acc = acc
 
 
-for epoch in range(start_epoch, start_epoch+1000):
+for epoch in range(start_epoch, start_epoch+200):
     train(epoch)
     test(epoch)

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from GAN_training.models.spectral_normalization import SpectralNorm
 import numpy as np
@@ -167,6 +168,51 @@ class Discriminator(nn.Module):
 
         return disc_logits.view(-1, 1).squeeze(1), self.softmax(aux_logits).squeeze()
 
+class ProjectionDiscriminator(nn.Module):
+    """
+    Includes no classification
+    """
+    def __init__(self, opt):
+        super(ProjectionDiscriminator, self).__init__()
+
+        self.opt = opt
+        ndf = 128
+        self.ngpu = int(opt.ngpu)
+        self.feat_net = nn.Sequential(
+            FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            ResBlockDiscriminator(ndf, ndf, stride=2),
+            nn.ReLU(),
+        )
+
+        
+        self.disc_net = nn.Sequential(
+            SpectralNorm(nn.Linear(ndf, 1, bias=False))
+        )
+        self.disc_net.apply(utils.weights_init_spectral)
+        
+        self.conditioning_embedding = nn.Sequential(
+            SpectralNorm(nn.Embedding(opt.num_classes, ndf)),
+            
+        )
+        self.conditioning_embedding.apply(utils.weights_init_spectral)
+
+    def forward(self, input, conditioning):
+        if self.ngpu > 1:
+            raise NotImplementedError()
+        else:
+            feat = self.feat_net(input)
+            feat = torch.sum(feat, dim=(2, 3))
+
+            projection = feat * self.conditioning_embedding(conditioning)
+            projection = torch.sum(projection, dim=1)
+
+            output = self.disc_net(feat) + projection
+
+        return output, None
+
+
 class Classifier(nn.Module):
     def __init__(self, opt):
         super(Classifier, self).__init__()
@@ -208,6 +254,7 @@ class ClassifierMultiHinge(nn.Module):
 
         self.opt = opt
         ndf = 128
+        self.ndf = ndf
         self.ngpu = int(opt.ngpu)
         self.feat_net = nn.Sequential(
             FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
@@ -217,20 +264,48 @@ class ClassifierMultiHinge(nn.Module):
             nn.ReLU(),
         )
 
-        self.aux_net = nn.Sequential(
-            SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
-        )
+        if opt.projection_discriminator:
+            self.aux_net = nn.Sequential(
+                SpectralNorm(nn.Linear(ndf, opt.num_classes, bias=False))
+            )
+        else:
+            self.aux_net = nn.Sequential(
+                SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
+            )
         self.aux_net.apply(utils.weights_init_spectral)
+        if opt.projection_discriminator:
+            self.conditioning_embedding = nn.Sequential(
+                SpectralNorm(nn.Embedding(opt.num_classes - 1, ndf*(opt.num_classes))),
+                
+            )
+            self.conditioning_embedding.apply(utils.weights_init_spectral)
 
-    def forward(self, input):
+    def forward(self, input, conditioning=None):
+        """
+        conditioning must not be none if opt.projection_discriminator is true
+        """
         if self.ngpu > 1:
             feat = nn.parallel.data_parallel(self.feat_net, input, range(self.ngpu))
             aux_logits = nn.parallel.data_parallel(self.aux_net, feat, range(self.ngpu))
+            if self.opt.projection_discriminator:
+                raise NotImplementedError()
         else:
             feat = self.feat_net(input)
-            aux_logits = self.aux_net(feat)
+            if self.opt.projection_discriminator:
+                # this is the global pooling since aux net is now different 
+                feat = torch.sum(feat, dim=(2, 3), keepdim=True)
+                feat = feat.squeeze(-1)
+                projection = feat * self.conditioning_embedding(conditioning).view(-1, self.ndf, self.opt.num_classes)
+                projection = torch.sum(projection, dim=1)
+                
+                feat = feat.squeeze(-1)
+                aux_logits = self.aux_net(feat)
+            else:
+                aux_logits = self.aux_net(feat)
 
         output = aux_logits.squeeze()
+        if self.opt.projection_discriminator:
+            output += projection.squeeze()
         return output[:,self.opt.num_classes-1], output
 
 

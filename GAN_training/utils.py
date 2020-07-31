@@ -1,6 +1,8 @@
 import os
 import torch
 
+import pdb
+
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
@@ -15,8 +17,11 @@ def weights_init_radford(m):
         m.weight.data.normal_(0.0, 0.02)
 
 def weights_init_spectral(m):
+    """
+    N02 Called Radford also?
+    """
     classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
+    if (classname.find('Conv') != -1) or (classname.find('Linear') != -1):
         m.weight_u.data.normal_(0.0, 0.02)
         m.weight_v.data.normal_(0.0, 0.02)
         m.weight_bar.data.normal_(0.0, 0.02)

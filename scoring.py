@@ -14,7 +14,7 @@ import fid
 import inception as iscore
 import imageio
 import tensorflow as tf
-from torchvision.datasets import CIFAR10, STL10, ImageFolder
+from torchvision.datasets import CIFAR10, STL10, ImageFolder, CIFAR100
 import torch
 import visdom
 from torchvision import transforms
@@ -28,7 +28,7 @@ import pdb
 class optclass:
     workaround = True
 
-def calc_cifar():
+def calc_cifar(last_npz=''):
     N = 50000
     optinst = optclass()
     optdict = {
@@ -54,13 +54,26 @@ def calc_cifar():
         end = start + optinst.train_batch_size_2
         images[start:end] = np.array(x)
 
-    mis, sis = iscore.get_inception_score(images)
-    
-    print('IS: %f (+/- %f)' % (mis, sis))
-    
-    mfid, sfid = fid_ms_for_imgs(images)
-    
-    np.savez(optinst.dataset_is_fid, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+    if last_npz:
+        print('calculating fid for real data')
+        
+        mfid, sfid = fid_ms_for_imgs(images)
+        f = np.load(last_npz)
+        mdata, sdata = f['mfid'], f['sfid']
+        fid_value = fid.calculate_frechet_distance(mfid, sfid, mdata, sdata)
+        
+        print('FID: %f' % (fid_value))
+        
+        np.savez(optinst.dataset_is_fid + '.second', mfid=mfid, sfid=sfid, fid_value=fid_value)
+        
+    else:
+        mis, sis = iscore.get_inception_score(images)
+        
+        print('IS: %f (+/- %f)' % (mis, sis))
+        
+        mfid, sfid = fid_ms_for_imgs(images)
+        
+        np.savez(optinst.dataset_is_fid, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
     
 def calc_stl():
     print('Calculating STL IS and FID')
@@ -70,12 +83,12 @@ def calc_stl():
         'data_root': '/scratch0/ilya/locDoc/data/stl10',
 #         'data_root': '/fs/vulcan-scratch/ilyak/locDoc/data/stl10',
         'dataset': 'stl',
-        'imageSize': 48,
+        'imageSize': 32,
         'dev_batch_size': 100,
         'size_labeled_data': 4000,
         'train_batch_size': 100,
         'train_batch_size_2': 100,
-        'outdata_fname': '/scratch0/ilya/locDoc/data/stl10/fid_is_scores.npz',
+        'outdata_fname': '/scratch0/ilya/locDoc/data/stl10/fid_is_32_scores.npz',
 #         'outdata_fname': '/fs/vulcan-scratch/ilyak/locDoc/data/stl10/fid_is_scores.npz'
     }
     for k, v in optdict.items():
@@ -86,6 +99,49 @@ def calc_stl():
         transforms.Lambda(lambda img: np.array(img))])
     
     training_set = STL10(optinst.data_root, split='unlabeled', download=True, transform=tform)
+    trainloader = torch.utils.data.DataLoader(training_set, batch_size=optinst.train_batch_size_2, shuffle=True, num_workers=2)
+    assert(len(trainloader) * optinst.train_batch_size_2 >= N)
+    images = np.empty((N,optinst.imageSize,optinst.imageSize,3))
+    for i, xy in enumerate(trainloader, 0):
+        x, _ = xy
+        start = i * optinst.train_batch_size_2
+        end = start + optinst.train_batch_size_2
+        images[start:end] = np.array(x)
+        if end >= N:
+            break
+
+    mis, sis = iscore.get_inception_score(images)
+    
+    print('IS: %f (+/- %f)' % (mis, sis))
+    
+    mfid, sfid = fid_ms_for_imgs(images)
+    
+    np.savez(optinst.outdata_fname, mfid=mfid, sfid=sfid, mis=mis, sis=sis)
+    
+def calc_cifar100():
+    print('Calculating Cifar100 IS and FID')
+    N = 50000
+    optinst = optclass()
+    optdict = {
+        #'data_root': '/scratch0/ilya/locDoc/data/cifar100',
+        'data_root': '/fs/vulcan-scratch/ilyak/locDoc/data',
+        'dataset': 'stl',
+        'imageSize': 32,
+        'dev_batch_size': 100,
+        'size_labeled_data': 4000,
+        'train_batch_size': 100,
+        'train_batch_size_2': 100,
+        # 'outdata_fname': '/scratch0/ilya/locDoc/data/cifar100/fid_is_32_scores.npz',
+        'outdata_fname': '/fs/vulcan-scratch/ilyak/locDoc/data/cifar100/fid_is_scores.npz',
+    }
+    for k, v in optdict.items():
+        setattr(optinst, k, v)
+
+    tform = transforms.Compose([
+        transforms.Resize(optinst.imageSize),
+        transforms.Lambda(lambda img: np.array(img))])
+    
+    training_set = CIFAR100(optinst.data_root, train=True, download=True, transform=tform)
     trainloader = torch.utils.data.DataLoader(training_set, batch_size=optinst.train_batch_size_2, shuffle=True, num_workers=2)
     assert(len(trainloader) * optinst.train_batch_size_2 >= N)
     images = np.empty((N,optinst.imageSize,optinst.imageSize,3))
@@ -219,8 +275,9 @@ def batch_scores(opt):
     data_stats = np.load(opt.dataset_is_fid)
     scores_todo = opt.scores_todo.split(',')
     
-    # make/load history files in each
     def load_or_make_hist(d):
+        """make/load history files in each
+        """
         if not os.path.isdir(d):
             raise Exception('%s is not a valid directory' % d)
         f = os.path.join(d, HIST_FNAME)
@@ -272,7 +329,11 @@ def batch_scores(opt):
     for j, c in enumerate(cps):
         for i, d in enumerate(full_paths):
             mfG = os.path.join(d, 'netG_iter_%06d.pth' % c)
-            if ('IS' in hists[i][c]) and ('FID' in hists[i][c]) and not opt.overwrite:
+            is_saved = int('IS' in hists[i][c])
+            is_todo = int('IS' in scores_todo)
+            fid_saved = int('FID' in hists[i][c])
+            fid_todo = int('FID' in scores_todo)
+            if not opt.overwrite and (is_todo <= is_saved) and (fid_todo <= fid_saved):
                 print('SKIPPING %s, values already computed' % mfG)
                 next
             elif os.path.isfile(mfG):
@@ -321,7 +382,7 @@ def batch_scores(opt):
                 torch.cuda.empty_cache() # without this get the error: Failed to get convolution algorithm
                 # scoring starts
                 if 'IS' in scores_todo:
-                    if (not ('IS' in hists[i][c])) or opt.overwrite: 
+                    if (not ('IS' in hists[i][c])) or opt.overwrite:
                         mis, sis = iscore.get_inception_score(x, mem_fraction=opt.tfmem)
                         print('[%s][%06d] IS mu: %f. IS sigma: %f.' % (legend[i], c, mis, sis))
                         hists[i][c]['IS'] = [mis, sis]
@@ -368,6 +429,7 @@ if __name__ == '__main__':
     parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
     parser.add_argument('--scores_todo', default='IS,FID', help="")
     parser.add_argument('--acgan_noise', type=bool, default=False, help="Include this argument to generate noise as input to the generator with class 1 hots.")
+    parser.add_argument('--real_fid', default='', help="Include this argument to measure FID between real data.")
     
     # for batch mode from main.py
     parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size')
@@ -394,7 +456,11 @@ if __name__ == '__main__':
     elif opt.mode == 'batch':
         batch_scores(opt)
     elif opt.mode == 'calc_stl':
-        calc_stl()
+        calc_stl(opt.real_fid)
+    elif opt.mode == 'calc_cifar':
+        calc_cifar(opt.real_fid)
+    elif opt.mode == 'calc_cifar100':
+        calc_cifar100()
     elif opt.mode == 'calc_celeba':
         calc_celeba()
     else:

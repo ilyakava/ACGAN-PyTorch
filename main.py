@@ -60,10 +60,12 @@ parser.add_argument('--port', default=8097, type=int, help="which port visdom sh
 parser.add_argument('--visdom_board', default='main', type=str, help="name of visdom board to use.")
 parser.add_argument('--eval_period', type=int, default=1000)
 parser.add_argument('--gantype', default='main', type=str, help="modegan | acgan | mhgan")
-parser.add_argument('--scoring_period', type=int, default=10000)
+parser.add_argument('--scoring_period', type=int, default=1e9)
 parser.add_argument('--run_scoring_now', type=bool, default=False)
-parser.add_argument('--projection_discriminator', type=bool, default=False, help="Set to true to use Miyator Koyama ICLR 2018 projection discriminator")
-parser.add_argument('--noise_class_concat', type=bool, default=False, help="Set to true to have class labels writen to the noise")
+parser.add_argument('--projection_discriminator', action='store_true', help="Set to true to use Miyator Koyama ICLR 2018 projection discriminator")
+parser.add_argument('--conditional_bn', action='store_true', help="Set to true to use conditional batch norm in generator")
+parser.add_argument('--noise_class_concat', action='store_true', help="Set to true to have class labels writen to the noise")
+parser.add_argument('--plot_sorted_outputs', type=bool, default=False, help="Display sorted fakes/real images in visdom")
 
 # for data loader
 parser.add_argument('--size_labeled_data',  type=int, default=4000)
@@ -160,6 +162,8 @@ elif opt.dataset == 'celeba':
     metaloader = data.get_celeba_loaders
 elif opt.dataset == 'flower':
     metaloader = data.get_flower102_loaders
+elif opt.dataset == 'imagenet':
+    metaloader = data.get_imagenet_loaders
 else:
     raise NotImplementedError("No such dataset {}".format(opt.dataset))
 labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set = metaloader(opt)
@@ -179,17 +183,15 @@ if opt.netD == '' and netDfiles:
 if opt.imageSize == 32:
     netG = resnet.Generator(opt)
 elif opt.imageSize == 64:
-    if opt.gantype == 'mhgan' and opt.projection_discriminator:
-        netG = resnet_128.Generator64(num_classes=num_real_classes)
-    elif opt.gantype == 'mhgan':
-        netG = resnet_128.Generator64(num_classes=0)
+    if opt.projection_discriminator:
+        netG = resnet_128.Generator64SpecNorm(num_classes=num_real_classes)
     else:
         NotImplementedError()
 elif opt.imageSize == 48:
     netG = resnet_48.Generator(opt)
 elif opt.imageSize == 128:
-    if opt.gantype == 'mhgan':
-        netG = resnet_128.Generator(num_classes=num_real_classes)
+    if opt.projection_discriminator:
+        netG = resnet_128.GeneratorSpecNorm(num_classes=num_real_classes)
     else:
         NotImplementedError()
 else:
@@ -211,11 +213,13 @@ if opt.imageSize == 32:
         netD = resnet.Discriminator(opt)
     elif opt.gantype == 'mhgan':
         netD = resnet.ClassifierMultiHinge(opt)
+    elif opt.gantype == 'projection':
+        netD = resnet.ProjectionDiscriminator(opt)
 elif opt.imageSize == 64:
     if opt.gantype == 'mhgan' and opt.projection_discriminator:
         netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
-    elif opt.gantype == 'mhgan':
-        netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
+    elif opt.projection_discriminator:
+        netD = resnet_128.Discriminator64(num_classes=opt.num_classes)
     else:
         NotImplementedError()
 elif opt.imageSize == 48:
@@ -224,8 +228,10 @@ elif opt.imageSize == 48:
     else:
         NotImplementedError()
 elif opt.imageSize == 128:
-    if opt.gantype == 'mhgan':
+    if opt.gantype == 'mhgan' and opt.projection_discriminator:
         netD = resnet_128.ClassifierMultiHinge(num_classes=opt.num_classes)
+    elif opt.projection_discriminator:
+        netD = resnet_128.Discriminator(num_classes=opt.num_classes)
     else:
         NotImplementedError()
 else:
@@ -238,10 +244,14 @@ print(netD)
 
 # loss functions
 nll = nn.NLLLoss()
-def dis_criterion(inputs, labels):
+def dis_criterion_old(inputs, labels):
     # hinge loss
     # from Yogesh, probably from: https://github.com/wronnyhuang/gan_loss/blob/master/trainer.py
     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
+def dis_criterion(inputs, labels):
+    # hinge loss, flipped from Yogesh
+    # from cGAN projection: https://github.com/crcrpar/pytorch.sngan_projection/blob/master/losses.py
+    return torch.mean(F.relu(1 - inputs)*labels) + torch.mean(F.relu(1 + inputs)*(1-labels))
 # dis_criterion = nn.BCELoss()
 acgan_aux_criterion = nll
 def marygan_criterion(inputs, labels):
@@ -287,9 +297,6 @@ conditioning_label = torch.LongTensor(opt.train_batch_size) # use as network inp
 eval_conditioning_label = torch.LongTensor(opt.train_batch_size)
 real_label = 1
 fake_label = 0
-K = opt.num_classes
-if (opt.gantype == 'marygan'):
-    K = opt.num_classes - 1
 
 # if using cuda
 if opt.cuda:
@@ -312,10 +319,11 @@ conditioning_label = Variable(conditioning_label)
 eval_conditioning_label = Variable(eval_conditioning_label)
 # noise for evaluation
 eval_noise_ = np.random.normal(0, 1, (opt.train_batch_size, nz))
-eval_label_ = np.random.randint(0, num_classes, opt.train_batch_size)
-eval_onehot = np.zeros((opt.train_batch_size, num_classes))
-eval_onehot[np.arange(opt.train_batch_size), eval_label_] = 1
-eval_noise_[np.arange(opt.train_batch_size), :num_classes] = eval_onehot[np.arange(opt.train_batch_size)]
+eval_label_ = np.random.randint(0, num_real_classes, opt.train_batch_size)
+if opt.noise_class_concat:
+    eval_onehot = np.zeros((opt.train_batch_size, num_classes))
+    eval_onehot[np.arange(opt.train_batch_size), eval_label_] = 1
+    eval_noise_[np.arange(opt.train_batch_size), :num_classes] = eval_onehot[np.arange(opt.train_batch_size)]
 eval_noise_ = (torch.from_numpy(eval_noise_))
 eval_noise.data.copy_(eval_noise_.view(opt.train_batch_size, nz))
 eval_conditioning_label.data.copy_(torch.from_numpy(eval_label_))
@@ -340,6 +348,8 @@ running_accuracy = RunningAcc(100)
 
 
 while curr_iter <= opt.max_itr:
+    netD.train()
+    netG.train()
     curr_iter += 1
     this_run_iters +=1
     this_iter_start = time.time()
@@ -373,6 +383,9 @@ while curr_iter <= opt.max_itr:
         elif opt.gantype == 'mhgan':
             aux_errD_real = aux_criterion(aux_output, aux_label)
             errD_real = aux_errD_real
+        elif opt.gantype == 'projection':
+            dis_errD_real = dis_criterion(dis_output, dis_label)
+            errD_real = dis_errD_real
         errD_real.backward()
         D_x = dis_output.data.mean()
 
@@ -384,15 +397,15 @@ while curr_iter <= opt.max_itr:
                 accuracy = compute_acc(aux_output, aux_label)
 
         # train with fake
-        label = np.random.randint(0, num_classes, batch_size)
+        label = np.random.randint(0, num_real_classes, batch_size)
         aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
         conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
         noise.data.resize_(batch_size, nz).normal_(0, 1)
         noise_ = np.random.normal(0, 1, (batch_size, nz))
         if opt.noise_class_concat:
-            class_onehot = np.zeros((batch_size, num_classes))
+            class_onehot = np.zeros((batch_size, num_real_classes))
             class_onehot[np.arange(batch_size), label] = 1
-            noise_[np.arange(batch_size), :num_classes] = class_onehot
+            noise_[np.arange(batch_size), :num_real_classes] = class_onehot
         if opt.gantype == 'mhgan':
             # overwrite aux_label to signify fake
             label_for_fake = (opt.num_classes - 1) * np.ones(batch_size)
@@ -401,11 +414,13 @@ while curr_iter <= opt.max_itr:
         noise.data.copy_(noise_.view(batch_size, nz))
         dis_label.data.fill_(fake_label)
 
-        if opt.projection_discriminator:
+        if opt.conditional_bn:
             fake = netG(noise, conditioning_label)
-            dis_output, aux_output = netD(fake.detach(), conditioning_label)
         else:
             fake = netG(noise)
+        if opt.projection_discriminator:
+            dis_output, aux_output = netD(fake.detach(), conditioning_label)
+        else:
             dis_output, aux_output = netD(fake.detach())
 
         if (opt.gantype == 'marygan'):
@@ -416,6 +431,8 @@ while curr_iter <= opt.max_itr:
             errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
         elif opt.gantype == 'mhgan':
             errD_fake = aux_criterion(aux_output, aux_label)
+        elif opt.gantype == 'projection':
+            errD_fake = dis_criterion(dis_output, dis_label)
 
         errD_fake.backward()
         D_G_z1 = dis_output.data.mean()
@@ -461,11 +478,13 @@ while curr_iter <= opt.max_itr:
         errG = dis_errG + opt.aux_scale_G * aux_errG
     elif opt.gantype == 'mhgan':
         errG = crammer_singer_complement_criterion(aux_output, aux_label)
-        
         # aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
         # errG = aux_criterion(aux_output, aux_label)
 
         # errG = hinge_antifake(aux_output, aux_label)
+    elif opt.gantype == 'projection':
+        errG = -torch.mean(dis_output)
+        
 
     errG.backward()
     D_G_z2 = dis_output.data.mean()
@@ -474,200 +493,214 @@ while curr_iter <= opt.max_itr:
     ############################
     # A little running eval accuracy
     ###########################
-    if dev_loader:
-        real_cpu, label = dev_loader.next()
-        if opt.cuda:
-            real_cpu = real_cpu.cuda()
-        input.data.resize_as_(real_cpu).copy_(real_cpu)
-        dis_label.data.resize_(batch_size).fill_(real_label)
-        aux_label.data.resize_(batch_size).copy_(label)
-        dis_output, aux_output = netD(input.detach())
-        if opt.gantype == 'mhgan':
-            aux_output = aux_output[:,:(opt.num_classes-1)]
-
-        test_accuracy, test_acc_dev = running_accuracy.compute_acc(aux_output, aux_label)
-    else:
-        test_accuracy, test_acc_dev = -1, -1
-
-    # compute the average loss
-    all_loss_G = avg_loss_G * this_run_iters
-    all_loss_D = avg_loss_D * this_run_iters
-    all_loss_A = avg_loss_A * this_run_iters
-    all_loss_G += errG.item()
-    all_loss_D += errD.item()
-    all_loss_A += accuracy
-    avg_loss_G = all_loss_G / (this_run_iters + 1)
-    avg_loss_D = all_loss_D / (this_run_iters + 1)
-    avg_loss_A = all_loss_A / (this_run_iters + 1)
-
-    this_run_seconds += (time.time() - this_iter_start)
-
-    print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Train Acc: %.4f (%.4f) Test Acc: %.4f +/- %.2f'
-          % (curr_iter, this_run_iters / this_run_seconds,
-             errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A, test_accuracy, test_acc_dev))
-    
-    ### Save GAN Images to interface with IS and FID scores
-    if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
-        opt.run_scoring_now = False
-        n_used_imgs = 50000
-        all_fakes = np.empty((n_used_imgs,opt.imageSize,opt.imageSize,3), dtype=np.uint8)
-        if not os.path.exists('%s/GAN_OUTPUTS' % (opt.outf)):
-            os.makedirs('%s/GAN_OUTPUTS' % (opt.outf))
-        # save a bunch of GAN images
-        for i in tqdm(range(n_used_imgs // opt.train_batch_size),desc='Saving'):
-            start = i * opt.train_batch_size
-            end = start + opt.train_batch_size
-
-            # fake
-            noise.data.resize_(batch_size, nz).normal_(0, 1)
-            label = np.random.randint(0, num_classes, batch_size)
-            noise_ = np.random.normal(0, 1, (batch_size, nz))
-            if opt.noise_class_concat:
-                class_onehot = np.zeros((batch_size, num_classes))
-                class_onehot[np.arange(batch_size), label] = 1
-                noise_[np.arange(batch_size), :num_classes] = class_onehot
-            noise_ = (torch.from_numpy(noise_))
-            noise.data.copy_(noise_.view(batch_size, nz))
-            fake = netG(noise).data.cpu().numpy()
-            
-            fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
-            all_fakes[start:end] = np.moveaxis(fake,1,-1)
-
-        np.save('%s/GAN_OUTPUTS/out.npy' % (opt.outf), all_fakes)
-        with open('%s/scoring.info' % opt.outf,'w') as f:
-            f.write(str(curr_iter))
-
-
-    if (curr_iter-1) % opt.eval_period == 0:
-        history.append([errD.item(), errG.item()])
-        history_times.append(curr_iter)
-        # setup
-        nphist = np.array(history)
-        max_line_samples = 200
-        ds = max(1,nphist.shape[0] // (max_line_samples+1))
-        dts = decimate(history_times,ds)
-
-        new_ids = []
-
-
-        real_grid = vutils.make_grid(real_cpu, nrow=10, padding=2, normalize=True)
-        new_ids.append(vis.image(real_grid, win=winid(), opts={'title': 'Real Images' }))
-
-        dis_output, aux_output = netD(real_cpu)
-        # sort the real images
-        real_data = real_cpu.data.cpu()
-        if opt.gantype == 'mhgan':
-            preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
-        else:
-            preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
-        sorted_i = np.argsort(preds)
-        sorted_preds = preds[sorted_i]
-        sorted_real_imgs = np.zeros(real_data.shape)
-        plab = 0
-        for i in range(real_data.shape[0]):
-            now_lab = i // 10
-            # if we have too many images from earlier labels: fast forward
-            while (plab < len(sorted_preds)) and (sorted_preds[plab] < now_lab):
-                plab += 1
-
-            if (plab == len(sorted_preds)) or (sorted_preds[plab] > now_lab): # ran out of images for this label
-                # put in a blank image
-                sorted_real_imgs[i,:,:,:] = empty_img
-            elif sorted_preds[plab] == now_lab: # have an image
-                # use the image
-                sorted_real_imgs[i,:,:,:] = real_data[sorted_i[plab],:,:,:]
-                plab += 1
-
-        # plot sorted reals
-        real_grid_sorted = vutils.make_grid(torch.Tensor(sorted_real_imgs), nrow=10, padding=2, normalize=True)
-        new_ids.append(vis.image(real_grid_sorted, win=winid(), opts={'title': 'Sorted Real Images ' }))
-
-        # fake images
-        if opt.projection_discriminator:
-            fake = netG(eval_noise, eval_conditioning_label)
-        else:
-            fake = netG(eval_noise)
-
-        fake_grid = vutils.make_grid(fake.data, nrow=10, padding=2, normalize=True)
-        new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fixed Fakes' }))
-
-        # fake images, but sorted
-        n_display_per_class = 10
-        n_fakes_to_sort = n_display_per_class * num_real_classes
-        n_batches_to_generate = (n_fakes_to_sort // batch_size) + 1
-        sorted_fakes_shape = (n_batches_to_generate * batch_size, nc, opt.imageSize, opt.imageSize)
-        all_fake_imgs = np.zeros(sorted_fakes_shape)
-        all_preds = np.zeros((sorted_fakes_shape[0],))
-        # generate these images
-        for i in range(n_batches_to_generate):
-            # set noise
-            label = np.random.randint(0, num_classes, batch_size)
-            aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
-            noise_ = np.random.normal(0, 1, (batch_size, nz))
-            conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
-            if opt.noise_class_concat:
-                class_onehot = np.zeros((batch_size, num_classes))
-                class_onehot[np.arange(batch_size), label] = 1
-                noise_[np.arange(batch_size), :num_classes] = class_onehot
-            noise_ = (torch.from_numpy(noise_))
-            noise.data.copy_(noise_.view(batch_size, nz))
-            # generate
+    with torch.no_grad():
+        netD.eval()
+        netG.eval()
+        if dev_loader:
+            real_cpu, label = dev_loader.next()
+            if opt.cuda:
+                real_cpu = real_cpu.cuda()
+            input.data.resize_as_(real_cpu).copy_(real_cpu)
+            dis_label.data.resize_(batch_size).fill_(real_label)
+            aux_label.data.resize_(batch_size).copy_(label)
+            conditioning_label.data.resize_(batch_size).copy_(label)
             if opt.projection_discriminator:
-                fake = netG(noise, conditioning_label)
-                dis_output, aux_output = netD(fake, conditioning_label)
+                dis_output, aux_output = netD(input.detach(), conditioning_label)
             else:
-                fake = netG(noise)
-                dis_output, aux_output = netD(fake)
+                dis_output, aux_output = netD(input.detach())
             if opt.gantype == 'mhgan':
-                preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
+                aux_output = aux_output[:,:(opt.num_classes-1)]
+
+            test_accuracy, test_acc_dev = running_accuracy.compute_acc(aux_output, aux_label)
+        else:
+            test_accuracy, test_acc_dev = -1, -1
+
+        # compute the average loss
+        all_loss_G = avg_loss_G * this_run_iters
+        all_loss_D = avg_loss_D * this_run_iters
+        all_loss_A = avg_loss_A * this_run_iters
+        all_loss_G += errG.item()
+        all_loss_D += errD.item()
+        all_loss_A += accuracy
+        avg_loss_G = all_loss_G / (this_run_iters + 1)
+        avg_loss_D = all_loss_D / (this_run_iters + 1)
+        avg_loss_A = all_loss_A / (this_run_iters + 1)
+
+        this_run_seconds += (time.time() - this_iter_start)
+
+        print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Train Acc: %.4f (%.4f) Test Acc: %.4f +/- %.2f'
+              % (curr_iter, this_run_iters / this_run_seconds,
+                 errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A, test_accuracy, test_acc_dev))
+        
+        ### Save GAN Images to interface with IS and FID scores
+        if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
+            opt.run_scoring_now = False
+            n_used_imgs = 50000
+            all_fakes = np.empty((n_used_imgs,opt.imageSize,opt.imageSize,3), dtype=np.uint8)
+            if not os.path.exists('%s/GAN_OUTPUTS' % (opt.outf)):
+                os.makedirs('%s/GAN_OUTPUTS' % (opt.outf))
+            # save a bunch of GAN images
+            for i in tqdm(range(n_used_imgs // opt.train_batch_size),desc='Saving'):
+                start = i * opt.train_batch_size
+                end = start + opt.train_batch_size
+
+                # fake
+                noise.data.resize_(batch_size, nz).normal_(0, 1)
+                label = np.random.randint(0, num_real_classes, batch_size)
+                conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+                noise_ = np.random.normal(0, 1, (batch_size, nz))
+                if opt.noise_class_concat:
+                    class_onehot = np.zeros((batch_size, num_real_classes))
+                    class_onehot[np.arange(batch_size), label] = 1
+                    noise_[np.arange(batch_size), :num_real_classes] = class_onehot
+                noise_ = (torch.from_numpy(noise_))
+                noise.data.copy_(noise_.view(batch_size, nz))
+                if opt.conditional_bn:
+                    fake = netG(noise, conditioning_label).data.cpu().numpy()
+                else:
+                    fake = netG(noise).data.cpu().numpy()
+                
+                fake = np.floor((fake + 1) * 255/2.0).astype(np.uint8)
+                all_fakes[start:end] = np.moveaxis(fake,1,-1)
+
+            np.save('%s/GAN_OUTPUTS/out.npy' % (opt.outf), all_fakes)
+            with open('%s/scoring.info' % opt.outf,'w') as f:
+                f.write(str(curr_iter))
+
+
+        if (curr_iter - 1) % opt.eval_period == 0:
+            history.append([errD.item(), errG.item()])
+            history_times.append(curr_iter)
+            # setup
+            nphist = np.array(history)
+            max_line_samples = 200
+            ds = max(1,nphist.shape[0] // (max_line_samples+1))
+            dts = decimate(history_times,ds)
+
+            new_ids = []
+
+            # figure of real images
+            real_grid = vutils.make_grid(real_cpu, nrow=10, padding=2, normalize=True)
+            new_ids.append(vis.image(real_grid, win=winid(), opts={'title': 'Real Images' }))
+
+            # figure of sorted real images
+            if opt.plot_sorted_outputs:
+                dis_output, aux_output = netD(real_cpu)
+                real_data = real_cpu.data.cpu()
+                if opt.gantype == 'mhgan':
+                    preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
+                else:
+                    preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+                sorted_i = np.argsort(preds)
+                sorted_preds = preds[sorted_i]
+                sorted_real_imgs = np.zeros(real_data.shape)
+                plab = 0
+                for i in range(real_data.shape[0]):
+                    now_lab = i // 10
+                    # if we have too many images from earlier labels: fast forward
+                    while (plab < len(sorted_preds)) and (sorted_preds[plab] < now_lab):
+                        plab += 1
+
+                    if (plab == len(sorted_preds)) or (sorted_preds[plab] > now_lab): # ran out of images for this label
+                        # put in a blank image
+                        sorted_real_imgs[i,:,:,:] = empty_img
+                    elif sorted_preds[plab] == now_lab: # have an image
+                        # use the image
+                        sorted_real_imgs[i,:,:,:] = real_data[sorted_i[plab],:,:,:]
+                        plab += 1
+
+                # plot sorted reals
+                real_grid_sorted = vutils.make_grid(torch.Tensor(sorted_real_imgs), nrow=10, padding=2, normalize=True)
+                new_ids.append(vis.image(real_grid_sorted, win=winid(), opts={'title': 'Sorted Real Images ' }))
+
+            # figure of fake images
+            if opt.conditional_bn:
+                fake = netG(eval_noise, eval_conditioning_label)
             else:
-                preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
-            # save
-            all_fake_imgs[(i*batch_size):((i+1)*batch_size)] = fake.data.cpu()
-            all_preds[(i*batch_size):((i+1)*batch_size)] = preds
+                fake = netG(eval_noise)
 
-        sorted_i = np.argsort(all_preds)
-        sorted_preds = all_preds[sorted_i]
-        sorted_imgs = np.zeros(sorted_fakes_shape)
-        plab = 0 # pointer in sorted arrays
-        for i in range(sorted_fakes_shape[0]): # iterate through unfilled sorted_imgs
-            now_lab = i // n_display_per_class
-            # if we have too many images from earlier labels: fast forward
-            while (plab < sorted_fakes_shape[0]) and (sorted_preds[plab] < now_lab):
-                plab += 1
+            fake_grid = vutils.make_grid(fake.data, nrow=10, padding=2, normalize=True)
+            new_ids.append(vis.image(fake_grid, win=winid(), opts={'title': 'Fixed Fakes' }))
 
-            if (plab == sorted_fakes_shape[0]) or (sorted_preds[plab] > now_lab): # ran out of images for this label
-                # put in a blank image
-                sorted_imgs[i,:,:,:] = empty_img
-            elif sorted_preds[plab] == now_lab: # have an image
-                # use the image
-                sorted_imgs[i,:,:,:] = all_fake_imgs[sorted_i[plab],:,:,:]
-                plab += 1
+            # figure of fake images, but sorted
+            if opt.plot_sorted_outputs:
+                n_display_per_class = 10
+                n_fakes_to_sort = n_display_per_class * num_real_classes
+                n_batches_to_generate = (n_fakes_to_sort // batch_size) + 1
+                sorted_fakes_shape = (n_batches_to_generate * batch_size, nc, opt.imageSize, opt.imageSize)
+                all_fake_imgs = np.zeros(sorted_fakes_shape)
+                all_preds = np.zeros((sorted_fakes_shape[0],))
+                # generate these images
+                for i in range(n_batches_to_generate):
+                    # set noise
+                    label = np.random.randint(0, num_real_classes, batch_size)
+                    aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+                    noise_ = np.random.normal(0, 1, (batch_size, nz))
+                    conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+                    if opt.noise_class_concat:
+                        class_onehot = np.zeros((batch_size, num_real_classes))
+                        class_onehot[np.arange(batch_size), label] = 1
+                        noise_[np.arange(batch_size), :num_real_classes] = class_onehot
+                    noise_ = (torch.from_numpy(noise_))
+                    noise.data.copy_(noise_.view(batch_size, nz))
+                    # generate
+                    if opt.projection_discriminator:
+                        fake = netG(noise, conditioning_label)
+                        dis_output, aux_output = netD(fake, conditioning_label)
+                    else:
+                        fake = netG(noise)
+                        dis_output, aux_output = netD(fake)
+                    if opt.gantype == 'mhgan':
+                        preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
+                    else:
+                        preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+                    # save
+                    all_fake_imgs[(i*batch_size):((i+1)*batch_size)] = fake.data.cpu()
+                    all_preds[(i*batch_size):((i+1)*batch_size)] = preds
 
-        # plot sorted fakes in groups of classes
-        n_classes_display_per_group = 10
-        for i in range(num_real_classes // n_classes_display_per_group):
-            group = sorted_imgs[(i*n_display_per_class*n_classes_display_per_group):((i+1)*n_display_per_class*n_classes_display_per_group)]
-            fake_grid_sorted = vutils.make_grid(torch.Tensor(group), nrow=10, padding=2, normalize=True)
-            new_ids.append(vis.image(fake_grid_sorted, win=winid(), opts={'title': 'Sorted Fakes Class %i-%i' % (i*n_classes_display_per_group,(i+1)*n_classes_display_per_group) }))
+                sorted_i = np.argsort(all_preds)
+                sorted_preds = all_preds[sorted_i]
+                sorted_imgs = np.zeros(sorted_fakes_shape)
+                plab = 0 # pointer in sorted arrays
+                for i in range(sorted_fakes_shape[0]): # iterate through unfilled sorted_imgs
+                    now_lab = i // n_display_per_class
+                    # if we have too many images from earlier labels: fast forward
+                    while (plab < sorted_fakes_shape[0]) and (sorted_preds[plab] < now_lab):
+                        plab += 1
 
-        new_ids.append(vis.line(decimate(nphist[:,:2],ds), dts, win=winid(), opts={'legend': ['D', 'G'], 'title': 'Loss'}))
+                    if (plab == sorted_fakes_shape[0]) or (sorted_preds[plab] > now_lab): # ran out of images for this label
+                        # put in a blank image
+                        sorted_imgs[i,:,:,:] = empty_img
+                    elif sorted_preds[plab] == now_lab: # have an image
+                        # use the image
+                        sorted_imgs[i,:,:,:] = all_fake_imgs[sorted_i[plab],:,:,:]
+                        plab += 1
 
-        # done plotting, update ids
-        visdom_visuals_ids = new_ids
+                # plot sorted fakes in groups of classes
+                n_classes_display_per_group = 10
+                for i in range(num_real_classes // n_classes_display_per_group):
+                    group = sorted_imgs[(i*n_display_per_class*n_classes_display_per_group):((i+1)*n_display_per_class*n_classes_display_per_group)]
+                    fake_grid_sorted = vutils.make_grid(torch.Tensor(group), nrow=10, padding=2, normalize=True)
+                    new_ids.append(vis.image(fake_grid_sorted, win=winid(), opts={'title': 'Sorted Fakes Class %i-%i' % (i*n_classes_display_per_group,(i+1)*n_classes_display_per_group) }))
 
-        # save latest
-        if latest_save:
-            os.remove('%s/netG_iter_%06d.pth' % (opt.outf, latest_save))
-            os.remove('%s/netD_iter_%06d.pth' % (opt.outf, latest_save))
-        torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
-        torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
-        latest_save = curr_iter
+            # figure of losses
+            new_ids.append(vis.line(decimate(nphist[:,:2],ds), dts, win=winid(), opts={'legend': ['D', 'G'], 'title': 'Loss'}))
 
-    # do historical checkpointing
-    if curr_iter % opt.save_period == (opt.save_period - 1):
-        torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
-        torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
-        vutils.save_image(fake.data,'%s/fake_samples_iter_%06d.png' % (opt.outf, curr_iter), normalize=True)
+            # done plotting, update ids
+            visdom_visuals_ids = new_ids
+
+            # save and overwrite latest checkpoint
+            if latest_save:
+                os.remove('%s/netG_iter_%06d.pth' % (opt.outf, latest_save))
+                os.remove('%s/netD_iter_%06d.pth' % (opt.outf, latest_save))
+            torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
+            torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
+            latest_save = curr_iter
+
+        # do historical checkpointing (these are not overwritten)
+        if curr_iter % opt.save_period == (opt.save_period - 1):
+            torch.save(netG.state_dict(), '%s/netG_iter_%06d.pth' % (opt.outf, curr_iter))
+            torch.save(netD.state_dict(), '%s/netD_iter_%06d.pth' % (opt.outf, curr_iter))
+            vutils.save_image(fake.data,'%s/fake_samples_iter_%06d.png' % (opt.outf, curr_iter), normalize=True)
 
 print("Max iteration of %i reached. Quiting..." % opt.max_itr)

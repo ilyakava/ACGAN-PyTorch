@@ -54,6 +54,7 @@ def get_inception_score(images, splits=10, batch_size=100, mem_fraction=1):
       kl = part * (np.log(part) - np.log(np.expand_dims(np.mean(part, 0), 0)))
       kl = np.mean(np.sum(kl, 1))
       scores.append(np.exp(kl))
+    sess.close()
     return np.mean(scores), np.std(scores)
 
 # This function is called automatically.
@@ -84,7 +85,8 @@ def _init_inception():
     _ = tf.import_graph_def(graph_def, name='',
                             input_map={'ExpandDims:0':input_tensor})
   # Works with an arbitrary minibatch size.
-  with tf.Session() as sess:
+  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.5)
+  with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
     pool3 = sess.graph.get_tensor_by_name('pool_3:0')
     ops = pool3.graph.get_operations()
     for op_idx, op in enumerate(ops):

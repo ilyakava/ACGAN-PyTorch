@@ -12,6 +12,8 @@ def weights_init(m):
 
 # compute the current classification accuracy
 def compute_acc(preds, labels):
+    if preds is None:
+        return -1
     correct = 0
     preds_ = preds.data.max(1)[1]
     correct = preds_.eq(labels.data).cpu().sum()
