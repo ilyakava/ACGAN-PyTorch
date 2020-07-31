@@ -1,5 +1,8 @@
 """
 Code modified from PyTorch DCGAN examples: https://github.com/pytorch/examples/tree/master/dcgan
+
+Example Usage:
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest6 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001
 """
 from __future__ import print_function
 import argparse
@@ -52,7 +55,7 @@ parser.add_argument('--netG', default='', help="path to netG (to continue traini
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
-parser.add_argument('--num_classes', type=int, default=10, help='Number of classes for AC-GAN')
+parser.add_argument('--num_classes', type=int, default=10, help='Number of classes in dataset.')
 parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
 
 parser.add_argument('--host', default='http://ramawks69', type=str, help="hostname/server visdom listener is on.")
@@ -81,6 +84,11 @@ parser.add_argument('--aux_scale_G', type=float, default=0.1, help='WGAN default
 parser.add_argument('--aux_scale_D', type=float, default=1.0, help='WGAN default=1.0')
 parser.add_argument('--max_itr', type=int, default=1e10)
 parser.add_argument('--save_period', type=int, default=10000)
+
+parser.add_argument("--d_loss", help="nll | activation_maximization | activation_minimization", default="nll")
+parser.add_argument("--g_loss", help="see d_loss", default="positive_log_likelihood")
+parser.add_argument("--g_loss_aux", help="see d_loss", default=None)
+parser.add_argument('--g_loss_aux_weight', default=0.0, type=float)
 
 
 opt = parser.parse_args()
@@ -139,11 +147,11 @@ ngpu = int(opt.ngpu)
 nz = int(opt.nz)
 ngf = int(opt.ngf)
 ndf = int(opt.ndf)
+opt.num_classes = int(opt.num_classes)
 num_classes = int(opt.num_classes)
-num_real_classes = opt.num_classes
-if (opt.gantype == 'marygan') or (opt.gantype == 'mhgan'):
-    num_real_classes = opt.num_classes - 1
-nc = 3
+# if (opt.gantype == 'marygan') or (opt.gantype == 'mhgan'):
+#     opt.num_classes = opt.num_classes - 1
+nc = opt.nc
 if not opt.dev_batch_size:
     opt.dev_batch_size = opt.train_batch_size
 if not opt.train_batch_size_2:
@@ -152,6 +160,8 @@ if not opt.train_batch_size_2:
 # dataset
 if opt.dataset == 'cifar':
     metaloader = data.get_cifar_loaders
+elif opt.dataset == 'mnist_subset':
+    metaloader = data.get_mnist_subset_loaders
 elif opt.dataset == 'cifar100':
     metaloader = data.get_cifar100_loaders
 elif opt.dataset == 'cifar20':
@@ -182,21 +192,21 @@ if opt.netD == '' and netDfiles:
 # Define the generator and initialize the weights
 if opt.imageSize == 32:
     netG = resnet.Generator(opt)
-elif opt.imageSize == 64:
-    if opt.projection_discriminator:
-        netG = resnet_128.Generator64SpecNorm(num_classes=num_real_classes)
-    else:
-        NotImplementedError()
-elif opt.imageSize == 48:
-    netG = resnet_48.Generator(opt)
-elif opt.imageSize == 128:
-    if opt.projection_discriminator:
-        netG = resnet_128.GeneratorSpecNorm(num_classes=num_real_classes)
-    else:
-        NotImplementedError()
+# elif opt.imageSize == 64:
+#     if opt.projection_discriminator:
+#         netG = resnet_128.Generator64SpecNorm(num_classes=opt.num_classes)
+#     else:
+#         NotImplementedError()
+# elif opt.imageSize == 48:
+#     netG = resnet_48.Generator(opt)
+# elif opt.imageSize == 128:
+#     if opt.projection_discriminator:
+#         netG = resnet_128.GeneratorSpecNorm(num_classes=opt.num_classes)
+#     else:
+#         NotImplementedError()
 else:
     raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
-# netG.apply(weights_init)
+# netG.apply(weights_init) # TODO: explain why this is commented out
 if opt.netG != '':
     print('Loading %s...' % opt.netG)
     netG.load_state_dict(torch.load(opt.netG))
@@ -207,33 +217,34 @@ print(netG)
 
 # Define the discriminator and initialize the weights
 if opt.imageSize == 32:
-    if (opt.gantype == 'marygan'):
-        netD = resnet.Classifier(opt)
-    elif opt.gantype == 'acgan':
-        netD = resnet.Discriminator(opt)
-    elif opt.gantype == 'mhgan':
-        netD = resnet.ClassifierMultiHinge(opt)
-    elif opt.gantype == 'projection':
-        netD = resnet.ProjectionDiscriminator(opt)
-elif opt.imageSize == 64:
-    if opt.gantype == 'mhgan' and opt.projection_discriminator:
-        netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
-    elif opt.projection_discriminator:
-        netD = resnet_128.Discriminator64(num_classes=opt.num_classes)
-    else:
-        NotImplementedError()
-elif opt.imageSize == 48:
-    if opt.gantype == 'mhgan':
-        netD = resnet_48.ClassifierMultiHinge(opt)
-    else:
-        NotImplementedError()
-elif opt.imageSize == 128:
-    if opt.gantype == 'mhgan' and opt.projection_discriminator:
-        netD = resnet_128.ClassifierMultiHinge(num_classes=opt.num_classes)
-    elif opt.projection_discriminator:
-        netD = resnet_128.Discriminator(num_classes=opt.num_classes)
-    else:
-        NotImplementedError()
+    netD = resnet.Classifier(opt)
+#     if (opt.gantype == 'marygan'):
+#         netD = resnet.Classifier(opt)
+#     elif opt.gantype == 'acgan':
+#         netD = resnet.Discriminator(opt)
+#     elif opt.gantype == 'mhgan':
+#         netD = resnet.ClassifierMultiHinge(opt)
+#     elif opt.gantype == 'projection':
+#         netD = resnet.ProjectionDiscriminator(opt)
+# elif opt.imageSize == 64:
+#     if opt.gantype == 'mhgan' and opt.projection_discriminator:
+#         netD = resnet_128.ClassifierMultiHinge64(num_classes=opt.num_classes)
+#     elif opt.projection_discriminator:
+#         netD = resnet_128.Discriminator64(num_classes=opt.num_classes)
+#     else:
+#         NotImplementedError()
+# elif opt.imageSize == 48:
+#     if opt.gantype == 'mhgan':
+#         netD = resnet_48.ClassifierMultiHinge(opt)
+#     else:
+#         NotImplementedError()
+# elif opt.imageSize == 128:
+#     if opt.gantype == 'mhgan' and opt.projection_discriminator:
+#         netD = resnet_128.ClassifierMultiHinge(num_classes=opt.num_classes)
+#     elif opt.projection_discriminator:
+#         netD = resnet_128.Discriminator(num_classes=opt.num_classes)
+#     else:
+#         NotImplementedError()
 else:
     raise NotImplementedError('A network for imageSize %i is not implemented!' % opt.imageSize)
 # netD.apply(weights_init)
@@ -243,48 +254,129 @@ if opt.netD != '':
 print(netD)
 
 # loss functions
-nll = nn.NLLLoss()
-def dis_criterion_old(inputs, labels):
-    # hinge loss
-    # from Yogesh, probably from: https://github.com/wronnyhuang/gan_loss/blob/master/trainer.py
-    return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
-def dis_criterion(inputs, labels):
-    # hinge loss, flipped from Yogesh
-    # from cGAN projection: https://github.com/crcrpar/pytorch.sngan_projection/blob/master/losses.py
-    return torch.mean(F.relu(1 - inputs)*labels) + torch.mean(F.relu(1 + inputs)*(1-labels))
-# dis_criterion = nn.BCELoss()
-acgan_aux_criterion = nll
-def marygan_criterion(inputs, labels):
-    return nll(torch.log(inputs),labels)
-def crammer_singer_criterion(X, Ylabel):
-    mask = torch.ones_like(X)
-    mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
-    wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],opt.num_classes-1)
-    max_wrong, _ = wrongs.max(1)
-    max_wrong = max_wrong.unsqueeze(-1)
-    target = X.gather(1,Ylabel.unsqueeze(-1))
-    return torch.mean(F.relu(1 + max_wrong - target))
-def crammer_singer_complement_criterion(X, Ylabel):
-    mask = torch.ones_like(X)
-    mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
-    wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],opt.num_classes-1)
-    max_wrong, _ = wrongs.max(1)
-    max_wrong = max_wrong.unsqueeze(-1)
-    target = X.gather(1,Ylabel.unsqueeze(-1))
-    return torch.mean(F.relu(1 - max_wrong + target))
-def hinge_antifake(X, Ylabel):
-    target = X.gather(1,Ylabel.unsqueeze(-1))
-    label_for_fake = (opt.num_classes - 1) * np.ones(Ylabel.shape[0])
-    Ylabel.data.copy_(torch.from_numpy(label_for_fake))
-    pred_for_fake = X.gather(1,Ylabel.unsqueeze(-1))
-    return torch.mean(F.relu(1 + pred_for_fake - target))
+# nll = nn.NLLLoss()
+# def dis_criterion_old(inputs, labels):
+#     # hinge loss
+#     # from Yogesh, probably from: https://github.com/wronnyhuang/gan_loss/blob/master/trainer.py
+#     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
+# def dis_criterion(inputs, labels):
+#     # hinge loss, flipped from Yogesh
+#     # from cGAN projection: https://github.com/crcrpar/pytorch.sngan_projection/blob/master/losses.py
+#     return torch.mean(F.relu(1 - inputs)*labels) + torch.mean(F.relu(1 + inputs)*(1-labels))
+# # dis_criterion = nn.BCELoss()
+# acgan_aux_criterion = nll
+# def marygan_criterion(inputs, labels):
+#     return nll(torch.log(inputs),labels)
+# def crammer_singer_criterion(X, Ylabel):
+#     mask = torch.ones_like(X)
+#     mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+#     wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],opt.num_classes-1)
+#     max_wrong, _ = wrongs.max(1)
+#     max_wrong = max_wrong.unsqueeze(-1)
+#     target = X.gather(1,Ylabel.unsqueeze(-1))
+#     return torch.mean(F.relu(1 + max_wrong - target))
+# def crammer_singer_complement_criterion(X, Ylabel):
+#     mask = torch.ones_like(X)
+#     mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+#     wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],opt.num_classes-1)
+#     max_wrong, _ = wrongs.max(1)
+#     max_wrong = max_wrong.unsqueeze(-1)
+#     target = X.gather(1,Ylabel.unsqueeze(-1))
+#     return torch.mean(F.relu(1 - max_wrong + target))
+# def hinge_antifake(X, Ylabel):
+#     target = X.gather(1,Ylabel.unsqueeze(-1))
+#     label_for_fake = (opt.num_classes - 1) * np.ones(Ylabel.shape[0])
+#     Ylabel.data.copy_(torch.from_numpy(label_for_fake))
+#     pred_for_fake = X.gather(1,Ylabel.unsqueeze(-1))
+#     return torch.mean(F.relu(1 + pred_for_fake - target))
+losses_on_logits = ['crammer_singer', 'crammer_singer_complement', 'confuse']
+losses_on_features = ['feature_matching', 'feature_matching_l1']
+nll = nn.NLLLoss() # cross entropy but assumes log was already taken
+def myloss(X=None, Ylabel=None, Xfeat=None, Yfeat=None, loss_type='nll'):
+    """For trying multiple losses.
+    Args:
+        X: preds, could be probabilities or logits
+        Ylabel: scalar labels
+        
+        Y1hot: target_1hot, target_lab
 
-if (opt.gantype == 'marygan'):
-    aux_criterion = marygan_criterion
-elif opt.gantype == 'acgan':
-    aux_criterion = acgan_aux_criterion
-elif opt.gantype == 'mhgan':
-    aux_criterion = crammer_singer_criterion
+        wgan should take raw ouput of network, no softmax
+    """
+    # NLL case takes indices
+    if loss_type == 'nll_builtin':
+        return nll(torch.log(X), Ylabel)
+    elif loss_type == 'nll':
+        target = X.gather(1,Ylabel.unsqueeze(-1))
+        return torch.mean(-torch.log(target))
+    elif loss_type == 'feature_matching':
+        return torch.mean((torch.mean(Xfeat, dim=0) - torch.mean(Yfeat, dim=0))**2)
+    elif loss_type == 'feature_matching_l1':
+        return torch.mean(torch.abs(torch.mean(Xfeat, dim=0) - torch.mean(Yfeat, dim=0)))
+    elif loss_type == 'positive_log_likelihood':
+        # go away from Ylabel
+        target = X.gather(1,Ylabel.unsqueeze(-1))
+        return torch.mean(torch.log(target))
+    elif loss_type == 'activation_maximization':
+        # Ylabel acts as 'target' to avoid
+        mask = torch.ones_like(X)
+        mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+        wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K)
+        max_wrong, _ = wrongs.max(1)
+        return torch.mean(-torch.log(max_wrong))
+    elif loss_type == 'activation_minimization':
+        # Ylabel acts as 'target' to avoid
+        mask = torch.ones_like(X)
+        mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+        wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K)
+        min_wrong, _ = wrongs.min(1)
+        return torch.mean(-torch.log(min_wrong))
+    elif loss_type == 'confuse':
+        confuse_margin = 0.1 #  0.01
+        
+        mask = torch.ones_like(X)
+        mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+        wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K)
+        max_wrong, max_Ylabel = wrongs.max(1)
+
+        mask.scatter_(1, max_Ylabel.unsqueeze(-1), 0)
+        wrongs2 = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K-1)
+        runnerup_wrong, _ = wrongs2.max(1)
+        # make a step towards the margin if it is far from the margin
+        return torch.mean(F.relu(-confuse_margin + max_wrong - runnerup_wrong))
+    # elif loss_type == 'wasserstein':
+    #     inputs = X.gather(1,Ylabel.unsqueeze(-1))
+    #     labels = Y1hot.gather(1,Ylabel.unsqueeze(-1))
+    #     return torch.mean(inputs*labels) - torch.mean(inputs*(1-labels))
+    # elif loss_type == 'hinge':
+    #     inputs = X.gather(1,Ylabel.unsqueeze(-1))
+    #     labels = Y1hot.gather(1,Ylabel.unsqueeze(-1))
+    #     return torch.mean(F.relu(1 + inputs*labels)) + torch.mean(F.relu(1 - inputs*(1-labels)))
+    elif loss_type == 'crammer_singer':
+        mask = torch.ones_like(X)
+        mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+        wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K)
+        max_wrong, _ = wrongs.max(1)
+        max_wrong = max_wrong.unsqueeze(-1)
+        target = X.gather(1,Ylabel.unsqueeze(-1))
+        return torch.mean(F.relu(1 + max_wrong - target))
+    elif loss_type == 'crammer_singer_complement':
+        mask = torch.ones_like(X)
+        mask.scatter_(1, Ylabel.unsqueeze(-1), 0)
+        wrongs = torch.masked_select(X,mask.byte()).reshape(X.shape[0],K)
+        max_wrong, _ = wrongs.max(1)
+        max_wrong = max_wrong.unsqueeze(-1)
+        target = X.gather(1,Ylabel.unsqueeze(-1))
+        return torch.mean(F.relu(1 - max_wrong + target))
+    else:
+        raise NotImplementedError('Loss type: %s' % loss_type)
+
+
+# if (opt.gantype == 'marygan'):
+#     aux_criterion = marygan_criterion
+# elif opt.gantype == 'acgan':
+#     aux_criterion = acgan_aux_criterion
+# elif opt.gantype == 'mhgan':
+#     aux_criterion = crammer_singer_criterion
 
 
 # tensor placeholders
@@ -319,7 +411,7 @@ conditioning_label = Variable(conditioning_label)
 eval_conditioning_label = Variable(eval_conditioning_label)
 # noise for evaluation
 eval_noise_ = np.random.normal(0, 1, (opt.train_batch_size, nz))
-eval_label_ = np.random.randint(0, num_real_classes, opt.train_batch_size)
+eval_label_ = np.random.randint(0, opt.num_classes, opt.train_batch_size)
 if opt.noise_class_concat:
     eval_onehot = np.zeros((opt.train_batch_size, num_classes))
     eval_onehot[np.arange(opt.train_batch_size), eval_label_] = 1
@@ -357,6 +449,9 @@ while curr_iter <= opt.max_itr:
         ############################
         # (1) Update D network
         ###########################
+        d_kwargs = {'logits': False, 'features': False}
+        if opt.d_loss in losses_on_logits:
+            d_kwargs = {'logits': True, 'features': False}
         # train with real
         netD.zero_grad()
         real_cpu, label = labeled_loader.next()
@@ -368,78 +463,85 @@ while curr_iter <= opt.max_itr:
         aux_label.data.resize_(batch_size).copy_(label)
         conditioning_label.data.resize_(batch_size).copy_(label)
         
-        if opt.projection_discriminator:
-            dis_output, aux_output = netD(input, conditioning_label)
-        else:
-            dis_output, aux_output = netD(input)
+        dis_output = netD(input, **d_kwargs)
+        errD_real = myloss(dis_output, aux_label, loss_type=opt.d_loss)
+        
+        # if opt.projection_discriminator:
+        #     dis_output, aux_output = netD(input, conditioning_label)
+        # else:
 
-        if (opt.gantype == 'marygan'):
-            aux_errD_real = aux_criterion(aux_output, aux_label)
-            errD_real = aux_errD_real
-        elif opt.gantype == 'acgan':
-            aux_errD_real = aux_criterion(aux_output, aux_label)
-            dis_errD_real = dis_criterion(dis_output, dis_label)
-            errD_real = dis_errD_real + opt.aux_scale_D * aux_errD_real
-        elif opt.gantype == 'mhgan':
-            aux_errD_real = aux_criterion(aux_output, aux_label)
-            errD_real = aux_errD_real
-        elif opt.gantype == 'projection':
-            dis_errD_real = dis_criterion(dis_output, dis_label)
-            errD_real = dis_errD_real
+        # if (opt.gantype == 'marygan'):
+        #     aux_errD_real = aux_criterion(aux_output, aux_label)
+        #     errD_real = aux_errD_real
+        # elif opt.gantype == 'acgan':
+        #     aux_errD_real = aux_criterion(aux_output, aux_label)
+        #     dis_errD_real = dis_criterion(dis_output, dis_label)
+        #     errD_real = dis_errD_real + opt.aux_scale_D * aux_errD_real
+        # elif opt.gantype == 'mhgan':
+        #     aux_errD_real = aux_criterion(aux_output, aux_label)
+        #     errD_real = aux_errD_real
+        # elif opt.gantype == 'projection':
+        #     dis_errD_real = dis_criterion(dis_output, dis_label)
+        #     errD_real = dis_errD_real
+        
         errD_real.backward()
-        D_x = dis_output.data.mean()
+        D_x = dis_output[:,opt.num_classes].data.mean()
 
         # compute the current classification accuracy on train
         if dis_step == 0:
-            if opt.gantype == 'mhgan':
-                accuracy = compute_acc(aux_output[:,:(opt.num_classes-1)], aux_label)
-            else:
-                accuracy = compute_acc(aux_output, aux_label)
+            accuracy = compute_acc(dis_output[:,:opt.num_classes], aux_label)
+            # if opt.gantype == 'mhgan':
+            # else:
+            #     accuracy = compute_acc(aux_output, aux_label)
 
         # train with fake
-        label = np.random.randint(0, num_real_classes, batch_size)
+        label = np.random.randint(0, opt.num_classes, batch_size)
         aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
         conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
         noise.data.resize_(batch_size, nz).normal_(0, 1)
         noise_ = np.random.normal(0, 1, (batch_size, nz))
         if opt.noise_class_concat:
-            class_onehot = np.zeros((batch_size, num_real_classes))
+            class_onehot = np.zeros((batch_size, opt.num_classes))
             class_onehot[np.arange(batch_size), label] = 1
-            noise_[np.arange(batch_size), :num_real_classes] = class_onehot
-        if opt.gantype == 'mhgan':
+            noise_[np.arange(batch_size), :opt.num_classes] = class_onehot
+        if True: #opt.gantype == 'mhgan':
             # overwrite aux_label to signify fake
-            label_for_fake = (opt.num_classes - 1) * np.ones(batch_size)
+            label_for_fake = (opt.num_classes) * np.ones(batch_size)
             aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label_for_fake))
         noise_ = (torch.from_numpy(noise_))
         noise.data.copy_(noise_.view(batch_size, nz))
         dis_label.data.fill_(fake_label)
 
-        if opt.conditional_bn:
-            fake = netG(noise, conditioning_label)
-        else:
-            fake = netG(noise)
-        if opt.projection_discriminator:
-            dis_output, aux_output = netD(fake.detach(), conditioning_label)
-        else:
-            dis_output, aux_output = netD(fake.detach())
+        fake = netG(noise)
+        dis_output = netD(fake.detach(), **d_kwargs)
+        
+        errD_fake = myloss(dis_output, aux_label, loss_type=opt.d_loss)
+        # if opt.conditional_bn:
+        #     fake = netG(noise, conditioning_label)
+        # else:
+        #     fake = netG(noise)
+        # if opt.projection_discriminator:
+        #     dis_output, aux_output = netD(fake.detach(), conditioning_label)
+        # else:
+        #     dis_output, aux_output = netD(fake.detach())
 
-        if (opt.gantype == 'marygan'):
-            errD_fake = -torch.mean(torch.log(dis_output))
-        elif opt.gantype == 'acgan':
-            dis_errD_fake = dis_criterion(dis_output, dis_label)
-            aux_errD_fake = aux_criterion(aux_output, aux_label)
-            errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
-        elif opt.gantype == 'mhgan':
-            errD_fake = aux_criterion(aux_output, aux_label)
-        elif opt.gantype == 'projection':
-            errD_fake = dis_criterion(dis_output, dis_label)
+        # if (opt.gantype == 'marygan'):
+        #     errD_fake = -torch.mean(torch.log(dis_output))
+        # elif opt.gantype == 'acgan':
+        #     dis_errD_fake = dis_criterion(dis_output, dis_label)
+        #     aux_errD_fake = aux_criterion(aux_output, aux_label)
+        #     errD_fake = dis_errD_fake + opt.aux_scale_D * aux_errD_fake
+        # elif opt.gantype == 'mhgan':
+        #     errD_fake = aux_criterion(aux_output, aux_label)
+        # elif opt.gantype == 'projection':
+        #     errD_fake = dis_criterion(dis_output, dis_label)
 
         errD_fake.backward()
-        D_G_z1 = dis_output.data.mean()
+        D_G_z1 = dis_output[:,opt.num_classes].data.mean()
         errD = errD_real + errD_fake
         
         # train with unlabeled
-        if unlabeled_loader and opt.gantype == 'mhgan':
+        if False and unlabeled_loader: # and opt.gantype == 'mhgan':
             unl_images, _ = unlabeled_loader.next()
             if opt.cuda:
                 unl_images = unl_images.cuda()
@@ -462,32 +564,53 @@ while curr_iter <= opt.max_itr:
     ############################
     # (2) Update G network
     ###########################
+    gd_kwargs = {'logits': False, 'features': False}
+    if opt.g_loss in losses_on_features:
+        gd_kwargs = {'logits': False, 'features': True}
+    if opt.g_loss in losses_on_logits:
+        gd_kwargs = {'logits': True, 'features': False}
+    real_features = None
+    fake_features = None
+    output = None
+    
     netG.zero_grad()
     dis_label.data.fill_(real_label)  # fake labels are real for generator cost
 
-    if opt.projection_discriminator:
-        dis_output, aux_output = netD(fake, conditioning_label)
+    if gd_kwargs['features']:
+        fake_features = netD(fake,**gd_kwargs).squeeze()
+        real_features = netD(real_cpu,**gd_kwargs).detach().squeeze()
     else:
-        dis_output, aux_output = netD(fake)
+        output = netD(fake,**gd_kwargs).squeeze()
+    # if opt.projection_discriminator:
+    #     dis_output, aux_output = netD(fake, conditioning_label)
+    # else:
+    #     dis_output, aux_output = netD(fake)
 
-    if (opt.gantype == 'marygan'):
-        errG = -torch.mean(torch.log(aux_output).max(1)[0])
-    elif opt.gantype == 'acgan':
-        dis_errG = dis_criterion(dis_output, dis_label)
-        aux_errG = aux_criterion(aux_output, aux_label)
-        errG = dis_errG + opt.aux_scale_G * aux_errG
-    elif opt.gantype == 'mhgan':
-        errG = crammer_singer_complement_criterion(aux_output, aux_label)
-        # aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
-        # errG = aux_criterion(aux_output, aux_label)
+    # if (opt.gantype == 'marygan'):
+    #     errG = -torch.mean(torch.log(aux_output).max(1)[0])
+    # elif opt.gantype == 'acgan':
+    #     dis_errG = dis_criterion(dis_output, dis_label)
+    #     aux_errG = aux_criterion(aux_output, aux_label)
+    #     errG = dis_errG + opt.aux_scale_G * aux_errG
+    # elif opt.gantype == 'mhgan':
+    #     errG = crammer_singer_complement_criterion(aux_output, aux_label)
+    #     # aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
+    #     # errG = aux_criterion(aux_output, aux_label)
 
-        # errG = hinge_antifake(aux_output, aux_label)
-    elif opt.gantype == 'projection':
-        errG = -torch.mean(dis_output)
-        
+    #     # errG = hinge_antifake(aux_output, aux_label)
+    # elif opt.gantype == 'projection':
+    #     errG = -torch.mean(dis_output)
+    
+    errG_main = myloss(X=output, Ylabel=aux_label, Xfeat=fake_features, Yfeat=real_features, loss_type=opt.g_loss)
+    if opt.g_loss_aux is not None:
+        errG_aux = myloss(X=output, Ylabel=aux_label, Xfeat=fake_features, Yfeat=real_features, loss_type=opt.g_loss_aux)
+    else: 
+        errG_aux = 0.0
+    
+    errG = (1 - opt.g_loss_aux_weight) * errG_main + opt.g_loss_aux_weight * errG_aux
 
     errG.backward()
-    D_G_z2 = dis_output.data.mean()
+    D_G_z2 = dis_output[:,opt.num_classes].data.mean()
     optimizerG.step()
 
     ############################
@@ -546,13 +669,13 @@ while curr_iter <= opt.max_itr:
 
                 # fake
                 noise.data.resize_(batch_size, nz).normal_(0, 1)
-                label = np.random.randint(0, num_real_classes, batch_size)
+                label = np.random.randint(0, opt.num_classes, batch_size)
                 conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
                 noise_ = np.random.normal(0, 1, (batch_size, nz))
                 if opt.noise_class_concat:
-                    class_onehot = np.zeros((batch_size, num_real_classes))
+                    class_onehot = np.zeros((batch_size, opt.num_classes))
                     class_onehot[np.arange(batch_size), label] = 1
-                    noise_[np.arange(batch_size), :num_real_classes] = class_onehot
+                    noise_[np.arange(batch_size), :opt.num_classes] = class_onehot
                 noise_ = (torch.from_numpy(noise_))
                 noise.data.copy_(noise_.view(batch_size, nz))
                 if opt.conditional_bn:
@@ -625,7 +748,7 @@ while curr_iter <= opt.max_itr:
             # figure of fake images, but sorted
             if opt.plot_sorted_outputs:
                 n_display_per_class = 10
-                n_fakes_to_sort = n_display_per_class * num_real_classes
+                n_fakes_to_sort = n_display_per_class * opt.num_classes
                 n_batches_to_generate = (n_fakes_to_sort // batch_size) + 1
                 sorted_fakes_shape = (n_batches_to_generate * batch_size, nc, opt.imageSize, opt.imageSize)
                 all_fake_imgs = np.zeros(sorted_fakes_shape)
@@ -633,14 +756,14 @@ while curr_iter <= opt.max_itr:
                 # generate these images
                 for i in range(n_batches_to_generate):
                     # set noise
-                    label = np.random.randint(0, num_real_classes, batch_size)
+                    label = np.random.randint(0, opt.num_classes, batch_size)
                     aux_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
                     noise_ = np.random.normal(0, 1, (batch_size, nz))
                     conditioning_label.data.resize_(batch_size).copy_(torch.from_numpy(label))
                     if opt.noise_class_concat:
-                        class_onehot = np.zeros((batch_size, num_real_classes))
+                        class_onehot = np.zeros((batch_size, opt.num_classes))
                         class_onehot[np.arange(batch_size), label] = 1
-                        noise_[np.arange(batch_size), :num_real_classes] = class_onehot
+                        noise_[np.arange(batch_size), :opt.num_classes] = class_onehot
                     noise_ = (torch.from_numpy(noise_))
                     noise.data.copy_(noise_.view(batch_size, nz))
                     # generate
@@ -678,7 +801,7 @@ while curr_iter <= opt.max_itr:
 
                 # plot sorted fakes in groups of classes
                 n_classes_display_per_group = 10
-                for i in range(num_real_classes // n_classes_display_per_group):
+                for i in range(opt.num_classes // n_classes_display_per_group):
                     group = sorted_imgs[(i*n_display_per_class*n_classes_display_per_group):((i+1)*n_display_per_class*n_classes_display_per_group)]
                     fake_grid_sorted = vutils.make_grid(torch.Tensor(group), nrow=10, padding=2, normalize=True)
                     new_ids.append(vis.image(fake_grid_sorted, win=winid(), opts={'title': 'Sorted Fakes Class %i-%i' % (i*n_classes_display_per_group,(i+1)*n_classes_display_per_group) }))

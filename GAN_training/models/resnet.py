@@ -218,7 +218,7 @@ class Classifier(nn.Module):
         super(Classifier, self).__init__()
 
         self.opt = opt
-        ndf = 128
+        ndf = opt.ndf
         self.ngpu = int(opt.ngpu)
         self.feat_net = nn.Sequential(
             FirstResBlockDiscriminator(opt.nc, ndf, stride=2),
@@ -229,21 +229,28 @@ class Classifier(nn.Module):
         )
 
         self.aux_net = nn.Sequential(
-            SpectralNorm(nn.Conv2d(ndf, opt.num_classes, 2, 1, 0, bias=False))
+            SpectralNorm(nn.Conv2d(ndf, opt.num_classes+1, 2, 1, 0, bias=False))
         )
         self.aux_net.apply(utils.weights_init_spectral)
         self.softmax = nn.Softmax()
 
-    def forward(self, input):
+    def forward(self, input, logits=False, features=False):
         if self.ngpu > 1:
             feat = nn.parallel.data_parallel(self.feat_net, input, range(self.ngpu))
             aux_logits = nn.parallel.data_parallel(self.aux_net, feat, range(self.ngpu))
         else:
             feat = self.feat_net(input)
             aux_logits = self.aux_net(feat)
+        
+        if features:
+            return feat.squeeze()
+        elif logits:
+            return aux_logits.squeeze()
+        else:
+            return self.softmax(aux_logits).squeeze()
 
-        output = self.softmax(aux_logits).squeeze()
-        return output[:,self.opt.num_classes-1], output[:,:(self.opt.num_classes-1)]
+        # output = self.softmax(aux_logits).squeeze()
+        # return output[:,self.opt.num_classes-1], output[:,:(self.opt.num_classes-1)]
 
 class ClassifierMultiHinge(nn.Module):
     """
