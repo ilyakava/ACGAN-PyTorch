@@ -3,12 +3,17 @@ Code modified from PyTorch DCGAN examples: https://github.com/pytorch/examples/t
 
 Example Usage:
 # For MNIST zeros and ones
-# Improved GAN / Mary GAN
-CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest6 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001
+# Improved GAN
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest13 --train_batch_size=32 --cuda --dataset mnist_subset --num_classes 2 --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss feature_matching
+# Mary GAN
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest13 --train_batch_size=32 --cuda --dataset mnist_subset --num_classes 2 --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --ndf 32 --ngf 32 --GAN_lrD 0.0001
 # activation maximization gan
 CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest7 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss activation_maximization
 # complement GAN
 CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest9 --train_batch_size=32 --cuda --dataset=mnist_subset --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 2 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss crammer_singer_complement --g_loss_aux confuse --g_loss_aux_weight 0.33 --confuse_margin 1.0
+
+# Full MNIST
+CUDA_VISIBLE_DEVICES=1 python main.py --outf=/scratch0/ilya/locDoc/ACGAN/experiments/julytest10 --train_batch_size=32 --cuda --dataset=mnist --imageSize=32 --data_root=/scratch0/ilya/locDoc/data/mnist --eval_period 50 --nc 1 --num_classes 10 --ndf 32 --ngf 32 --GAN_lrD 0.0001 --g_loss crammer_singer_complement --g_loss_aux confuse --g_loss_aux_weight 0.33 --confuse_margin 1.0
 """
 from __future__ import print_function
 import argparse
@@ -31,10 +36,10 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import data
-from utils import weights_init, compute_acc, decimate, RunningAcc
+from utils import weights_init, compute_acc, decimate, RunningAcc, MovingAverage
 from network import _netG, _netD, _netD_CIFAR10_SNGAN, _netG_CIFAR10_SNGAN
 from folder import ImageFolder
-from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48, resnet_128
+from GAN_training.models import DCGAN, DCGAN_spectralnorm, resnet, resnet_extra, resnet_48_flat, resnet_48, resnet_128, wideresnet
 
 import visdom
 import imageio
@@ -60,7 +65,7 @@ parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
-parser.add_argument('--manualSeed', type=int, help='manual seed')
+parser.add_argument('--random_seed', type=int, help='manual seed')
 parser.add_argument('--num_classes', type=int, default=10, help='Number of classes in dataset.')
 parser.add_argument('--net_type', default='flat', help='Only relevant for image size 48')
 
@@ -74,7 +79,7 @@ parser.add_argument('--run_scoring_now', type=bool, default=False)
 parser.add_argument('--projection_discriminator', action='store_true', help="Set to true to use Miyator Koyama ICLR 2018 projection discriminator")
 parser.add_argument('--conditional_bn', action='store_true', help="Set to true to use conditional batch norm in generator")
 parser.add_argument('--noise_class_concat', action='store_true', help="Set to true to have class labels writen to the noise")
-parser.add_argument('--plot_sorted_outputs', type=bool, default=False, help="Display sorted fakes/real images in visdom")
+parser.add_argument('--plot_sorted_outputs', action='store_true', help="Display sorted fakes/real images in visdom")
 
 # for data loader
 parser.add_argument('--size_labeled_data',  type=int, default=4000)
@@ -96,6 +101,7 @@ parser.add_argument("--g_loss", help="see d_loss", default="positive_log_likelih
 parser.add_argument("--g_loss_aux", help="see d_loss", default=None)
 parser.add_argument('--g_loss_aux_weight', default=0.0, type=float)
 parser.add_argument('--confuse_margin', default=1.0, type=float)
+parser.add_argument("--d_network", help="resnet | wideresnet", default="resnet")
 
 
 opt = parser.parse_args()
@@ -113,7 +119,7 @@ opt.batchSize = opt.train_batch_size
 vis = visdom.Visdom(env=opt.visdom_board, port=opt.port, server=opt.host)
 visdom_visuals_ids = []
 if opt.imageSize == 32:
-    empty_img = np.moveaxis(imageio.imread('404_32.png')[:,:,:3],-1,0) / 255.0
+    empty_img = np.moveaxis(imageio.imread('404_32.png')[:,:,:opt.nc],-1,0) / 255.0
 elif opt.imageSize == 64:
     empty_img = np.moveaxis(imageio.imread('404_64.png')[:,:,:3],-1,0) / 255.0
 elif opt.imageSize == 48:
@@ -135,13 +141,13 @@ try:
 except OSError:
     pass
 
-if opt.manualSeed is None:
-    opt.manualSeed = random.randint(1, 10000)
-print("Random Seed: ", opt.manualSeed)
-random.seed(opt.manualSeed)
-torch.manual_seed(opt.manualSeed)
+if opt.random_seed is None:
+    opt.random_seed = random.randint(1, 10000)
+print("Random Seed: ", opt.random_seed)
+random.seed(opt.random_seed)
+torch.manual_seed(opt.random_seed)
 if opt.cuda:
-    torch.cuda.manual_seed_all(opt.manualSeed)
+    torch.cuda.manual_seed_all(opt.random_seed)
 
 cudnn.benchmark = True
 
@@ -169,6 +175,8 @@ if opt.dataset == 'cifar':
     metaloader = data.get_cifar_loaders
 elif opt.dataset == 'mnist_subset':
     metaloader = data.get_mnist_subset_loaders
+elif opt.dataset == 'mnist':
+    metaloader = data.get_mnist_loaders
 elif opt.dataset == 'cifar100':
     metaloader = data.get_cifar100_loaders
 elif opt.dataset == 'cifar20':
@@ -223,8 +231,10 @@ else:
 print(netG)
 
 # Define the discriminator and initialize the weights
-if opt.imageSize == 32:
+if opt.d_network == 'resnet':
     netD = resnet.Classifier(opt)
+elif opt.d_network == 'wideresnet':
+    netD = wideresnet.WideResNet(num_classes=opt.num_classes+1)
 #     if (opt.gantype == 'marygan'):
 #         netD = resnet.Classifier(opt)
 #     elif opt.gantype == 'acgan':
@@ -445,6 +455,9 @@ latest_save = None
 this_run_iters = 0
 this_run_seconds = 0
 running_accuracy = RunningAcc(100)
+running_train_accuracy = RunningAcc(100)
+
+D_x_MA, D_G_z1_MA, D_G_z2_MA = MovingAverage(100), MovingAverage(100), MovingAverage(100)
 
 
 while curr_iter <= opt.max_itr:
@@ -497,7 +510,7 @@ while curr_iter <= opt.max_itr:
 
         # compute the current classification accuracy on train
         if dis_step == 0:
-            accuracy = compute_acc(dis_output[:,:opt.num_classes], aux_label)
+            train_accuracy, train_acc_dev = running_train_accuracy.compute_acc(dis_output[:,:opt.num_classes], aux_label)
             # if opt.gantype == 'mhgan':
             # else:
             #     accuracy = compute_acc(aux_output, aux_label)
@@ -648,22 +661,21 @@ while curr_iter <= opt.max_itr:
         else:
             test_accuracy, test_acc_dev = -1, -1
 
-        # compute the average loss
-        all_loss_G = avg_loss_G * this_run_iters
-        all_loss_D = avg_loss_D * this_run_iters
-        all_loss_A = avg_loss_A * this_run_iters
-        all_loss_G += errG.item()
-        all_loss_D += errD.item()
-        all_loss_A += accuracy
-        avg_loss_G = all_loss_G / (this_run_iters + 1)
-        avg_loss_D = all_loss_D / (this_run_iters + 1)
-        avg_loss_A = all_loss_A / (this_run_iters + 1)
+        # Print statistics
+        D_x_mean, D_x_sigma = D_x_MA.update(D_x.item())
+        D_G_z1_mean, D_G_z1_sigma = D_G_z1_MA.update(D_G_z1.item())
+        D_G_z2_mean, D_G_z2_sigma = D_G_z2_MA.update(D_G_z2.item()) # same as D_G_z1
 
         this_run_seconds += (time.time() - this_iter_start)
 
-        print('[%06d][%.2f itr/s] Loss_D: %.4f (%.4f) Loss_G: %.4f (%.4f) D(x): %.4f D(G(z)): %.4f / %.4f Train Acc: %.4f (%.4f) Test Acc: %.4f +/- %.2f'
-              % (curr_iter, this_run_iters / this_run_seconds,
-                 errD.item(), avg_loss_D, errG.item(), avg_loss_G, D_x, D_G_z1, D_G_z2, accuracy, avg_loss_A, test_accuracy, test_acc_dev))
+        basic_msg = '[%06d][%.2f itr/s] L_D: %.3f L_G: %.3f' \
+            % (curr_iter, this_run_iters / this_run_seconds,
+                 errD.item(), errG.item())
+        msg = ' D(x): %.2f +/-%.2f D(G(z)): %.2f +/-%.2f Train: %.1f +/-%.1f Test: %.1f +/-%.1f' \
+              % (D_x_mean, D_x_sigma,
+                 D_G_z1_mean, D_G_z1_sigma, train_accuracy, train_acc_dev, test_accuracy, test_acc_dev)
+        msg = re.sub(r"[\s-]0+\.", " .", msg) # get rid of leading zeros
+        print(basic_msg + msg)
         
         ### Save GAN Images to interface with IS and FID scores
         if opt.run_scoring_now or curr_iter % opt.scoring_period == 0:
@@ -718,12 +730,12 @@ while curr_iter <= opt.max_itr:
 
             # figure of sorted real images
             if opt.plot_sorted_outputs:
-                dis_output, aux_output = netD(real_cpu)
+                aux_output = netD(real_cpu)
                 real_data = real_cpu.data.cpu()
-                if opt.gantype == 'mhgan':
-                    preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
-                else:
-                    preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+                preds = torch.max(aux_output.detach()[:,:(opt.num_classes)],1)[1].data.cpu().numpy()
+                # if opt.gantype == 'mhgan':
+                # else:
+                #     preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
                 sorted_i = np.argsort(preds)
                 sorted_preds = preds[sorted_i]
                 sorted_real_imgs = np.zeros(real_data.shape)
@@ -777,16 +789,16 @@ while curr_iter <= opt.max_itr:
                     noise_ = (torch.from_numpy(noise_))
                     noise.data.copy_(noise_.view(batch_size, nz))
                     # generate
-                    if opt.projection_discriminator:
-                        fake = netG(noise, conditioning_label)
-                        dis_output, aux_output = netD(fake, conditioning_label)
-                    else:
-                        fake = netG(noise)
-                        dis_output, aux_output = netD(fake)
-                    if opt.gantype == 'mhgan':
-                        preds = torch.max(aux_output.detach()[:,:(opt.num_classes-1)],1)[1].data.cpu().numpy()
-                    else:
-                        preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
+                    # if opt.projection_discriminator:
+                    #     fake = netG(noise, conditioning_label)
+                    #     dis_output, aux_output = netD(fake, conditioning_label)
+                    # else:
+                    fake = netG(noise)
+                    aux_output = netD(fake)
+                    preds = torch.max(aux_output.detach()[:,:opt.num_classes],1)[1].data.cpu().numpy()
+                    # if opt.gantype == 'mhgan':
+                    # else:
+                    #     preds = torch.max(aux_output.detach(),1)[1].data.cpu().numpy()
                     # save
                     all_fake_imgs[(i*batch_size):((i+1)*batch_size)] = fake.data.cpu()
                     all_preds[(i*batch_size):((i+1)*batch_size)] = preds

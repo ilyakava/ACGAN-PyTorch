@@ -84,8 +84,8 @@ class DataLoader(object):
         self.images = torch.stack(self.images, 0)
         self.labels = torch.from_numpy(np.array(self.labels, dtype=np.int64)).squeeze()
 
-        if config.dataset == 'mnist':
-            self.images = self.images.view(self.images.size(0), -1)
+        # if config.dataset == 'mnist':
+        #     self.images = self.images.view(self.images.size(0), -1)
 
         self.batch_size = batch_size
 
@@ -130,10 +130,13 @@ class DataLoader(object):
         return self.len
 
 def get_mnist_loaders(config):
-    transform = transforms.Compose([transforms.ToTensor()])
+    transform=transforms.Compose([
+                        transforms.Resize((config.imageSize,config.imageSize)),
+                        transforms.ToTensor(),
+                      ])
     training_set = MNIST(config.data_root, train=True, download=True, transform=transform)
     dev_set = MNIST(config.data_root, train=False, download=True, transform=transform)
-
+    
     indices = np.arange(len(training_set))
     np.random.shuffle(indices)
     mask = np.zeros(indices.shape[0], dtype=np.bool)
@@ -153,12 +156,66 @@ def get_mnist_loaders(config):
         special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
     special_set = torch.stack(special_set)
 
-    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+    return labeled_loader, None, None, dev_loader, special_set
+
+# def get_mnist_loaders(config):
+#     # TODO pay attention to config.size_labeled_data
+#     # whitelist_labels = [0,1]
+#     whitelist_labels = list(range(10))
+#     # TODO add rotation etc.
+#     # normalizing MNIST with transforms.Normalize((0.1307,), (0.3081,)), leads
+#     # to early collapse
+#     transform=transforms.Compose([
+                        
+#                         transforms.Resize((config.imageSize,config.imageSize)),
+#                         transforms.ToTensor(),
+#                       ])
+#                         # transforms.Lambda(lambda x: x.repeat(3, 1, 1) ),
+#     training_set = MNIST(config.data_root, train=True, download=True, transform=transform)
+#     dev_set = MNIST(config.data_root, train=False, download=True, transform=transform)
+
+#     indices = np.arange(len(training_set))
+#     mask = np.zeros(indices.shape[0], dtype=np.bool)
+#     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+#     for i in whitelist_labels:
+#         mask[np.where(labels == i)[0]] = True
+        
+#     # relabel based on whitelist
+#     # for new_label, old_label in enumerate(whitelist_labels):
+#     #     for idx in np.where(labels == old_label)[0]:
+#     #         pdb.set_trace()
+#     #         training_set[idx][1] = new_label # does not support assignment
+            
+        
+#     labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
+#     print ('labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0])
+
+#     np.random.shuffle(labeled_indices)
+#     labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
+#     # unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size)
+#     # unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size)
     
+#     dev_indices = np.arange(len(dev_set))
+#     dev_mask = np.zeros(dev_indices.shape[0], dtype=np.bool)
+#     dev_labels = np.array([dev_set[i][1] for i in dev_indices], dtype=np.int64)
+#     for i in whitelist_labels:
+#         dev_mask[np.where(dev_labels == i)[0]] = True
+#     dev_indices = dev_indices[dev_mask]
+    
+#     dev_loader = DataLoader(config, dev_set, dev_indices, config.dev_batch_size)
+#     print ('dev size', dev_indices.shape[0])
+
+#     special_set = []
+#     for i in whitelist_labels:
+#         special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+#     special_set = torch.stack(special_set)
+
+#     return labeled_loader, None, None, dev_loader, special_set
+
 def get_mnist_subset_loaders(config):
     # TODO pay attention to config.size_labeled_data
-    whitelist_labels = [0,1]
-    # whitelist_labels = list(range(10))
+    # whitelist_labels = [0,1]
+    whitelist_labels = list(range(config.num_classes))
     # TODO add rotation etc.
     # normalizing MNIST with transforms.Normalize((0.1307,), (0.3081,)), leads
     # to early collapse
@@ -244,8 +301,18 @@ def get_svhn_loaders(config):
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
 def get_cifar_loaders(config):
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    training_set = CIFAR10(config.data_root, train=True, download=True, transform=transform)
+    rgb_mean = (0.5, 0.5, 0.5) # (0.4914, 0.4822, 0.4465) # (0.5, 0.5, 0.5)
+    rgb_std = (0.5, 0.5, 0.5) # (0.2023, 0.1994, 0.2010) # (0.5, 0.5, 0.5)
+    train_transform = transforms.Compose([
+        transforms.Resize(config.imageSize + 4),
+        transforms.RandomCrop(config.imageSize), # , padding=4
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(rgb_mean, rgb_std)])
+        
+        # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(rgb_mean, rgb_std)])
+    training_set = CIFAR10(config.data_root, train=True, download=True, transform=train_transform)
     dev_set = CIFAR10(config.data_root, train=False, download=True, transform=transform)
 
     indices = np.arange(len(training_set))

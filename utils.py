@@ -20,6 +20,21 @@ def compute_acc(preds, labels):
     acc = float(correct) / float(len(labels.data)) * 100.0
     return acc
 
+class MovingAverage(object):
+    def __init__(self, window_size):
+        self.window_size = window_size
+        self.window = []
+
+    def update(self, x):
+        self.window.append(x)
+        if len(self.window) > self.window_size:
+            self.window.pop(0)
+        if len(self.window) > 1:
+            sigma = stdev(self.window)
+        else:
+            sigma = 0
+        return mean(self.window), sigma
+
 class RunningAcc(object):
     def __init__(self, window_size):
         self.window_size = window_size
