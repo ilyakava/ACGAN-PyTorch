@@ -4,6 +4,8 @@ See README_og.md for complete details. Forked from `https://github.com/gitlimlab
 
 ## Example Usage:
 
+For cpu only remove `CUDA_VISIBLE_DEVICES=1` and `--cuda`.
+
 ### For MNIST zeros and ones
 
 #### Improved GAN
