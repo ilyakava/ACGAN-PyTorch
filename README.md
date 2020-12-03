@@ -1,6 +1,6 @@
 # Conditional Image Synthesis With Auxiliary Classifier GANs
 
-See README.md for complete details. Forked from `https://github.com/gitlimlab/ACGAN-PyTorch`
+See README_og.md for complete details. Forked from `https://github.com/gitlimlab/ACGAN-PyTorch`
 
 ## Example Usage:
 
